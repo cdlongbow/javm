@@ -116,7 +116,13 @@ pub fn parse_nfo(nfo_path: &Path, duration: &mut Option<i32>) -> Option<NfoData>
                             .attributes()
                             .flatten()
                             .find(|attr| attr.key.as_ref() == b"aspect")
-                            .and_then(|attr| attr.decode_and_unescape_value(reader.decoder()).ok())
+                            .and_then(|attr| {
+                                attr.decoded_and_normalized_value(
+                                    quick_xml::XmlVersion::Implicit1_0,
+                                    reader.decoder(),
+                                )
+                                .ok()
+                            })
                             .map(|value| value.to_string().to_ascii_lowercase());
                         current_tag = Some(tag);
                     }

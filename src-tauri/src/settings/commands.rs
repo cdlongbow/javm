@@ -393,7 +393,7 @@ pub struct TestApiResponse {
 #[tauri::command]
 pub async fn test_ai_api(request: TestApiRequest) -> Result<TestApiResponse, String> {
     let client = crate::utils::proxy::apply_proxy_auto(
-        reqwest::Client::builder()
+        wreq::Client::builder()
             .timeout(std::time::Duration::from_secs(15)),
     )
     .map_err(|e| e.to_string())?

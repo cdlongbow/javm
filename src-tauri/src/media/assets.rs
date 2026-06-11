@@ -752,7 +752,7 @@ pub async fn sync_extrafanart_from_urls(
     let extrafanart_dir = extrafanart_dir_for_video(video_path)?;
     fs::create_dir_all(&extrafanart_dir).map_err(|e| format!("创建 extrafanart 目录失败: {}", e))?;
 
-    let client = crate::resource_scrape::webclaw_client::create_client()?;
+    let client = crate::resource_scrape::fingerprint_client::create_client()?;
 
     let mut saved_paths = Vec::new();
     for (index, url) in images {

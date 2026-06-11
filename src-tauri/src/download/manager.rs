@@ -422,7 +422,7 @@ async fn capture_cover_as_fallback(app: &tauri::AppHandle, video_path: &str) -> 
 
 /// 执行刮削操作
 async fn perform_scrape(app: &tauri::AppHandle, video_path: &str) -> Result<(), String> {
-    use crate::resource_scrape::{webclaw_client, fetcher::Fetcher, sources::{self, ResourceSite}};
+    use crate::resource_scrape::{fingerprint_client, fetcher::Fetcher, sources::{self, ResourceSite}};
     use crate::resource_scrape::database_writer::DatabaseWriter;
     use crate::media::assets::save_nfo_for_video;
     use crate::db::Database;
@@ -454,7 +454,7 @@ async fn perform_scrape(app: &tauri::AppHandle, video_path: &str) -> Result<(), 
     );
 
     // 创建 Fetcher 获取 HTML
-    let http_client = webclaw_client::create_client()?;
+    let http_client = fingerprint_client::create_client()?;
     let fetcher = Fetcher::new(http_client);
 
     let fetch_settings = crate::settings::resolve_scrape_fetch_settings(&settings.scrape);

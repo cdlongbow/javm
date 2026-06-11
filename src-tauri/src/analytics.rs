@@ -656,7 +656,7 @@ async fn upload_payloads(
     }
 
     let client = crate::utils::proxy::apply_proxy_auto(
-        reqwest::Client::builder()
+        wreq::Client::builder()
             .timeout(std::time::Duration::from_secs(12)),
     )
     .map_err(|e| e.to_string())?

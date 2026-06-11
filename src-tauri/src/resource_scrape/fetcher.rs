@@ -10,7 +10,7 @@ use tauri::{AppHandle, Listener, Manager};
 
 use super::cf_detection;
 use super::sources::ResourceSite;
-use super::webclaw_client;
+use super::fingerprint_client;
 use super::webview_support;
 
 #[derive(Debug, Clone, Copy)]
@@ -21,10 +21,10 @@ pub struct FetchOptions {
     pub max_webview_windows: usize,
 }
 
-/// 双模式获取器：webclaw HTTP + WebView 回退
+/// 双模式获取器：wreq HTTP + WebView 回退
 pub struct Fetcher {
-    /// webclaw TLS 指纹 HTTP 客户端
-    http_client: webclaw_http::Client,
+    /// wreq TLS 指纹 HTTP 客户端
+    http_client: wreq::Client,
 }
 
 /// WebView 获取超时时间（秒）
@@ -192,13 +192,13 @@ impl WebviewPoolState {
 
 impl Fetcher {
     /// 创建新的获取器
-    pub fn new(http_client: webclaw_http::Client) -> Self {
+    pub fn new(http_client: wreq::Client) -> Self {
         Self { http_client }
     }
 
-    /// HTTP 模式获取网页 HTML（使用 webclaw Chrome TLS 指纹）
+    /// HTTP 模式获取网页 HTML（使用 wreq Chrome TLS 指纹）
     pub async fn fetch_http(&self, url: &str) -> Result<String, String> {
-        webclaw_client::fetch_html(&self.http_client, url).await
+        fingerprint_client::fetch_html(&self.http_client, url).await
     }
 
     /// WebView 模式获取网页 HTML
@@ -371,10 +371,10 @@ impl Fetcher {
         }
     }
 
-    /// 智能获取：webclaw HTTP 优先，CF 或失败时回退到 WebView
+    /// 智能获取：wreq HTTP 优先，CF 或失败时回退到 WebView
     ///
     /// 逻辑：
-    /// 1. 先用 webclaw（Chrome TLS 指纹）发起 HTTP 请求
+    /// 1. 先用 wreq（Chrome TLS 指纹）发起 HTTP 请求
     /// 2. 成功且内容正常 → 直接返回
     /// 3. 成功但检测到 CF 验证页 → 回退到 WebView（显示窗口让用户手动验证）
     /// 4. HTTP 4xx 客户端错误（404 等）→ 资源不存在，直接报错
@@ -396,7 +396,7 @@ impl Fetcher {
 
         match self.fetch_http(url).await {
             Ok(html) => {
-                // webclaw 成功拿到响应，检查是否是 CF 验证页或错页
+                // wreq 成功拿到响应，检查是否是 CF 验证页或错页
                 if cf_detection::is_cloudflare_challenge_html(&html) {
                     log::warn!(
                         "[scrape_fetch] event=http_cf_challenge site={} url={} action=fallback_webview",

@@ -145,10 +145,7 @@ async fn cover_dispatcher(
                 }
 
                 // 在 5%~15% 位置截取一帧（避开片头黑屏）
-                let percentage: f64 = {
-                    use rand::Rng;
-                    rand::thread_rng().gen_range(0.05..0.15)
-                };
+                let percentage: f64 = rand::random_range(0.05..0.15);
                 let timestamp = duration * percentage;
 
                 let temp_dir = std::env::temp_dir()

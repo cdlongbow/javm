@@ -11,7 +11,7 @@
 use super::fetcher::Fetcher;
 use super::sources;
 use super::sources::{ResourceSite, Source};
-use super::webclaw_client;
+use super::fingerprint_client;
 use crate::analytics;
 use crate::settings;
 use tauri::{AppHandle, Emitter, Manager};
@@ -200,7 +200,7 @@ fn enrich_search_result_detail(result: &mut SearchResult) {
 }
 
 async fn proxy_preview_images_to_files(
-    client: &webclaw_http::Client,
+    client: &wreq::Client,
     thumbs: &[String],
     _referer: &str,
 ) -> (Vec<String>, Option<Vec<String>>) {
@@ -282,7 +282,7 @@ pub async fn rs_search_resource(
     );
 
     analytics::record_search_designation(&app);
-    let http_client = webclaw_client::create_client()?;
+    let http_client = fingerprint_client::create_client()?;
     log::info!("[scrape_search] event=http_client_ready fingerprint=chrome_tls");
 
     let app_settings = settings::get_settings(app.clone()).await.unwrap_or_default();
@@ -573,7 +573,7 @@ pub async fn rs_cancel_search(
 /// 用于解决防盗链问题（如 projectjav 的封面图）
 #[tauri::command]
 pub async fn rs_proxy_image(url: String) -> Result<String, String> {
-    let client = webclaw_client::create_client()?;
+    let client = fingerprint_client::create_client()?;
     proxy_image_to_file(&client, &url).await
 }
 
@@ -597,13 +597,13 @@ fn get_image_cache_dir() -> Result<PathBuf, String> {
 
 /// 图片代理：下载图片到本地临时文件，返回本地文件路径
 ///
-/// 使用 webclaw（Chrome TLS 指纹）下载图片，绕过防盗链和反爬。
+/// 使用 wreq（Chrome TLS 指纹）下载图片，绕过防盗链和反爬。
 /// 前端使用 convertFileSrc() 将本地路径转为可访问的 URL。
 async fn proxy_image_to_file(
-    client: &webclaw_http::Client,
+    client: &wreq::Client,
     url: &str,
 ) -> Result<String, String> {
-    let bytes = webclaw_client::fetch_bytes(client, url).await
+    let bytes = fingerprint_client::fetch_bytes(client, url).await
         .map_err(|e| format!("图片请求失败: {}", e))?;
 
     if bytes.is_empty() {

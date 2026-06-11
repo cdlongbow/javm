@@ -712,7 +712,7 @@ impl Database {
                     director: row.get(6)?,
                     local_id: row.get(7)?,
                     rating: row.get(8)?,
-                    file_size: row.get::<_, Option<u64>>(9)?.unwrap_or(0),
+                    file_size: row.get::<_, Option<i64>>(9)?.unwrap_or(0) as u64,
                     fast_hash: row.get(10)?,
                     duration: row.get(11)?,
                     resolution: row.get(12)?,
@@ -839,7 +839,7 @@ impl Database {
                 data.studio,
                 data.premiered,
                 data.director,
-                data.file_size,
+                data.file_size as i64,
                 data.fast_hash,
                 data.original_title,
                 data.duration,
@@ -879,7 +879,7 @@ impl Database {
                 data.studio,
                 data.premiered,
                 data.director,
-                data.file_size,
+                data.file_size as i64,
                 data.fast_hash,
                 data.created_at,
                 data.scan_status,
@@ -935,7 +935,7 @@ impl Database {
                     director: row.get(5)?,
                     local_id: row.get(6)?,
                     rating: row.get(7)?,
-                    file_size: row.get::<_, Option<u64>>(8)?.unwrap_or(0),
+                    file_size: row.get::<_, Option<i64>>(8)?.unwrap_or(0) as u64,
                     fast_hash: row.get(9)?,
                     duration: row.get(10)?,
                     resolution: row.get(11)?,
@@ -966,7 +966,7 @@ impl Database {
     ) -> Result<()> {
         conn.execute(
             "INSERT INTO video_actors (video_id, actor_id, priority) VALUES (?, ?, ?)",
-            params![video_id, actor_id, priority],
+            params![video_id, actor_id, priority as i64],
         )?;
         Ok(())
     }

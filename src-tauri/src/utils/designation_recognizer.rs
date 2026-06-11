@@ -228,7 +228,7 @@ impl DesignationRecognizer {
             .ok_or_else(|| "No AI provider configured".to_string())?;
 
         let client = crate::utils::proxy::apply_proxy_auto(
-            reqwest::Client::builder()
+            wreq::Client::builder()
                 .timeout(std::time::Duration::from_secs(15)),
         )
         .map_err(|e| e.to_string())?
@@ -271,7 +271,7 @@ JAV番号的常见格式包括：
     /// 调用 Claude API
     async fn call_claude_api(
         &self,
-        client: &reqwest::Client,
+        client: &wreq::Client,
         base_url: &str,
         api_key: &str,
         model: &str,
@@ -322,7 +322,7 @@ JAV番号的常见格式包括：
     /// 调用 OpenAI 兼容 API
     async fn call_openai_compatible_api(
         &self,
-        client: &reqwest::Client,
+        client: &wreq::Client,
         base_url: &str,
         api_key: &str,
         model: &str,

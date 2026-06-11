@@ -63,7 +63,7 @@ async fn fetch_release_body_from_github(version: &str) -> Option<String> {
     let url = format!(
         "https://api.github.com/repos/ddmoyu/javm/releases/tags/{tag}"
     );
-    let resp = reqwest::Client::new()
+    let resp = wreq::Client::new()
         .get(&url)
         .header("User-Agent", "javm-updater")
         .header("Accept", "application/vnd.github+json")

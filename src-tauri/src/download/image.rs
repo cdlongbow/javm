@@ -6,28 +6,28 @@
 //!
 //! 所有需要下载图片的模块（media_assets、scraper 等）都应使用此模块，
 //! 避免重复实现下载逻辑。
-//! 使用 webclaw-http 客户端（Chrome TLS 指纹），统一反爬策略。
+//! 使用 wreq 客户端（Chrome TLS 指纹），统一反爬策略。
 
 use std::path::Path;
 use std::sync::Arc;
 
-use webclaw_http::Client as WebclawClient;
+use wreq::Client as HttpClient;
 
 /// 默认最大并发下载数
 const DEFAULT_MAX_CONCURRENT: usize = 5;
 
-/// 创建默认的 webclaw HTTP 客户端（Chrome TLS 指纹 + 代理）
-fn default_client() -> Result<WebclawClient, String> {
-    crate::resource_scrape::webclaw_client::create_client()
+/// 创建默认的 wreq HTTP 客户端（Chrome TLS 指纹 + 代理）
+fn default_client() -> Result<HttpClient, String> {
+    crate::resource_scrape::fingerprint_client::create_client()
 }
 
 /// 下载单张图片并保存到指定路径
 pub async fn download_image(
-    client: &WebclawClient,
+    client: &HttpClient,
     url: &str,
     save_path: &Path,
 ) -> Result<String, String> {
-    let bytes = crate::resource_scrape::webclaw_client::fetch_bytes(client, url).await?;
+    let bytes = crate::resource_scrape::fingerprint_client::fetch_bytes(client, url).await?;
 
     if bytes.is_empty() {
         return Err("下载的数据为空".to_string());
@@ -53,7 +53,7 @@ pub async fn download_image(
 pub async fn download_cover(
     video_path: &str,
     cover_url: &str,
-    client: Option<&WebclawClient>,
+    client: Option<&HttpClient>,
 ) -> Result<String, String> {
     if cover_url.trim().is_empty() {
         return Ok(String::new());
@@ -136,7 +136,7 @@ pub async fn download_images_batch(
     thumb_urls: &[String],
     save_dir: &Path,
     filename_prefix: &str,
-    client: Option<&WebclawClient>,
+    client: Option<&HttpClient>,
     max_concurrent: Option<usize>,
 ) -> Result<Vec<String>, String> {
     if thumb_urls.is_empty() {

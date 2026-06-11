@@ -63,12 +63,12 @@ pub fn resolve_proxy_url(config_dir: &Path) -> Option<url::Url> {
     }
 }
 
-/// 为 reqwest::ClientBuilder 应用代理设置（从全局缓存读取）
+/// 为 wreq::ClientBuilder 应用代理设置（从全局缓存读取）
 pub fn apply_proxy_auto(
-    builder: reqwest::ClientBuilder,
-) -> Result<reqwest::ClientBuilder, String> {
+    builder: wreq::ClientBuilder,
+) -> Result<wreq::ClientBuilder, String> {
     if let Some(proxy_url) = get_proxy_url() {
-        let proxy = reqwest::Proxy::all(proxy_url.as_str())
+        let proxy = wreq::Proxy::all(proxy_url.as_str())
             .map_err(|e| format!("代理配置无效: {e}"))?;
         Ok(builder.proxy(proxy))
     } else {
@@ -76,13 +76,13 @@ pub fn apply_proxy_auto(
     }
 }
 
-/// 为 reqwest::ClientBuilder 应用代理设置（从指定目录读取）
+/// 为 wreq::ClientBuilder 应用代理设置（从指定目录读取）
 pub fn apply_proxy(
-    builder: reqwest::ClientBuilder,
+    builder: wreq::ClientBuilder,
     config_dir: &Path,
-) -> Result<reqwest::ClientBuilder, String> {
+) -> Result<wreq::ClientBuilder, String> {
     if let Some(proxy_url) = resolve_proxy_url(config_dir) {
-        let proxy = reqwest::Proxy::all(proxy_url.as_str())
+        let proxy = wreq::Proxy::all(proxy_url.as_str())
             .map_err(|e| format!("代理配置无效: {e}"))?;
         Ok(builder.proxy(proxy))
     } else {

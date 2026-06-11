@@ -36,10 +36,10 @@ fn normalize_duration(value: Option<u64>) -> Option<u64> {
 }
 
 pub fn extract_metadata(path: &Path) -> Result<VideoMetadata, String> {
-    let mut metadata = match MediaSource::file_path(path) {
+    let mut metadata = match MediaSource::open(path) {
         Ok(ms) => {
             let mut parser = MediaParser::new();
-            let parsed: Result<TrackInfo, _> = parser.parse(ms);
+            let parsed: Result<TrackInfo, _> = parser.parse_track(ms);
             match parsed {
                 Ok(info) => VideoMetadata {
                     duration: normalize_duration(
@@ -48,10 +48,10 @@ pub fn extract_metadata(path: &Path) -> Result<VideoMetadata, String> {
                             .map(|d| d / 1000),
                     ),
                     width: normalize_dimension(
-                        info.get(TrackInfoTag::ImageWidth).and_then(val_to_u64),
+                        info.get(TrackInfoTag::Width).and_then(val_to_u64),
                     ),
                     height: normalize_dimension(
-                        info.get(TrackInfoTag::ImageHeight).and_then(val_to_u64),
+                        info.get(TrackInfoTag::Height).and_then(val_to_u64),
                     ),
                 },
                 Err(_) => VideoMetadata {

@@ -10,7 +10,7 @@
 //! - `process_task` 改用 Fetcher + Source Parser 获取元数据
 
 use crate::db::{Database, ScrapeStatus};
-use crate::resource_scrape::webclaw_client;
+use crate::resource_scrape::fingerprint_client;
 use crate::resource_scrape::database_writer::DatabaseWriter;
 use crate::resource_scrape::detector::ScrapedVideoDetector;
 use crate::resource_scrape::fetcher::Fetcher;
@@ -294,7 +294,7 @@ impl TaskQueueManager {
         );
 
         // 创建 Fetcher 获取 HTML
-        let http_client = webclaw_client::create_client()?;
+        let http_client = fingerprint_client::create_client()?;
         let fetcher = Fetcher::new(http_client);
 
         let fetch_settings = crate::settings::resolve_scrape_fetch_settings(&settings.scrape);

@@ -385,7 +385,7 @@ fn build_system_prompt(target_language: &str) -> String {
 
 async fn call_provider(provider: &SettingsAIProvider, system_prompt: &str, user_prompt: &str) -> Result<String, String> {
 	let client = crate::utils::proxy::apply_proxy_auto(
-		reqwest::Client::builder().timeout(std::time::Duration::from_secs(40)),
+		wreq::Client::builder().timeout(std::time::Duration::from_secs(40)),
 	)
 	.map_err(|e| e.to_string())?
 	.build()
@@ -413,7 +413,7 @@ async fn call_provider(provider: &SettingsAIProvider, system_prompt: &str, user_
 }
 
 async fn call_claude_api(
-	client: &reqwest::Client,
+	client: &wreq::Client,
 	base_url: &str,
 	api_key: &str,
 	model: &str,
@@ -461,7 +461,7 @@ async fn call_claude_api(
 }
 
 async fn call_openai_compatible_api(
-	client: &reqwest::Client,
+	client: &wreq::Client,
 	base_url: &str,
 	api_key: &str,
 	model: &str,

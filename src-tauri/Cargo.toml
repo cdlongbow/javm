@@ -26,38 +26,31 @@ tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 regex = "1.12.2"
-reqwest = { version = "0.11", features = ["json", "cookies", "rustls-tls"] }
-scraper = "0.18.1"
+scraper = "0.27"
 url = "2.5.8"
-nom-exif = "2.7.0"
+nom-exif = "3.6"
 base64 = "0.22"
-quick-xml = "0.39"
+quick-xml = "0.40"
 tokio = { version = "1", features = ["full"] }
 image = "0.25.9"
 tauri-plugin-fs = "2.4.5"
 tauri-plugin-localhost = "2.3.2"
-rand = "0.8"
+rand = "0.10"
 tokio-util = "0.7"
 thiserror = "2"
-sysinfo = "0.33"
-webclaw-http = { git = "https://github.com/0xMassi/webclaw-tls" }
+sysinfo = "0.39"
+wreq = { version = "5", features = ["json", "cookies", "gzip", "brotli", "deflate", "zstd"] }
+wreq-util = "2"
 tauri-plugin-log = "2.8.0"
 log = "0.4.29"
 
 [target.'cfg(windows)'.dependencies]
-winreg = "0.55"
+winreg = "0.56"
 
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
-
-[patch.crates-io]
-rustls = { git = "https://github.com/0xMassi/webclaw-tls", package = "rustls" }
-h2 = { git = "https://github.com/0xMassi/webclaw-tls", package = "h2" }
-hyper = { git = "https://github.com/0xMassi/webclaw-tls", package = "hyper" }
-hyper-util = { git = "https://github.com/0xMassi/webclaw-tls", package = "hyper-util" }
-reqwest = { git = "https://github.com/0xMassi/webclaw-tls", package = "reqwest" }

@@ -556,7 +556,7 @@ pub async fn update_video(app: AppHandle, db: State<'_, crate::db::Database>, id
                 let actor_id = crate::db::Database::get_or_create_actor(&tx, actor_name)?;
                 tx.execute(
                     "INSERT INTO video_actors (video_id, actor_id, priority) VALUES (?, ?, ?)",
-                    rusqlite::params![&id, actor_id, idx],
+                    rusqlite::params![&id, actor_id, idx as i64],
                 )?;
             }
         }
@@ -764,9 +764,8 @@ pub async fn download_remote_image(
     let next_index = crate::media::assets::next_extrafanart_index(video_path_obj);
     let save_path = save_dir.join(format!("fanart{}.jpg", next_index));
     let client = crate::utils::proxy::apply_proxy_auto(
-        reqwest::Client::builder()
+        wreq::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
-            .use_rustls_tls()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"),
     )
     .map_err(|e| AppError::Business(format!("创建 HTTP 客户端失败: {}", e)))?

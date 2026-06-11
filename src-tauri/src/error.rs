@@ -12,7 +12,7 @@ pub enum AppError {
     Serde(#[from] serde_json::Error),
 
     #[error("网络错误: {0}")]
-    Network(#[from] reqwest::Error),
+    Network(#[from] wreq::Error),
 
     #[error("{0}")]
     Business(String),
