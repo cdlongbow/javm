@@ -76,7 +76,7 @@ function toResourceItem(r: BackendSearchResult): ResourceItem {
 // 根据连续刮削次数动态调整延迟时间
 class DynamicDelayController {
     private scrapeCount: number = 0
-    private resetTimer: NodeJS.Timeout | null = null
+    private resetTimer: ReturnType<typeof setTimeout> | null = null
 
     // 获取当前延迟时间（毫秒）
     getDelay(): number {

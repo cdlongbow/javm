@@ -56,12 +56,11 @@ const router = createRouter({
 })
 
 // 路由守卫：更新页面标题
-router.beforeEach((to, _from, next) => {
+router.beforeEach((to) => {
     const title = to.meta.title as string
     if (title) {
         document.title = `${title} - JAVManager`
     }
-    next()
 })
 
 export default router
