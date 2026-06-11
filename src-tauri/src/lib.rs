@@ -210,13 +210,14 @@ pub fn run() {
 
                 // 兜底：窗口初始隐藏，正常由前端首屏渲染完成后显示；
                 // 若前端异常在若干秒内未显示，则强制显示，避免出现无窗口的幽灵进程。
-                // 兜底：正常由前端首屏挂载后显示窗口；若前端异常在 4 秒内未显示，
+                // 兜底：正常由前端首屏挂载后显示窗口；若前端在 8 秒内仍未显示
+                //（dev 模式 Vite 实时编译较慢时可能稍久，release 通常 <1 秒），
                 // 则强制显示，避免出现无窗口的幽灵进程。
                 let fallback_window = main_window.clone();
                 tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
                     if !fallback_window.is_visible().unwrap_or(false) {
-                        log::warn!("[startup] event=fallback_show_fired note=前端显示窗口失败，已由兜底显示");
+                        log::warn!("[startup] event=fallback_show_fired note=前端未在8秒内显示窗口，已由兜底强制显示");
                         let _ = fallback_window.show();
                     }
                 });
