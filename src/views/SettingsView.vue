@@ -1063,6 +1063,21 @@ watch(() => settingsStore.settings, async (newSettings) => {
 
                 <Separator />
 
+                <div class="space-y-3">
+                  <p class="font-medium">浏览器脚本</p>
+                  <Button
+                    variant="outline"
+                    class="w-full justify-between"
+                    @click="openExternalLink('https://greasyfork.org/zh-CN/scripts/572376-javm-m3u8-helper')"
+                  >
+                    <span>JAVM m3u8 Helper：从浏览器一键唤起下载</span>
+                    <ExternalLink class="h-4 w-4 text-muted-foreground" />
+                  </Button>
+                  <p class="text-sm text-muted-foreground">安装后可在浏览器中将 m3u8 链接直接发送到 JAVM 下载。</p>
+                </div>
+
+                <Separator />
+
                 <div class="space-y-2">
                   <p class="font-medium">版权信息</p>
                   <p class="text-sm text-muted-foreground">Copyright © 2026 JAVM Contributors. All rights reserved.</p>
