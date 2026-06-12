@@ -187,9 +187,11 @@ pub async fn download_images_batch(
     for handle in handles {
         match handle.await {
             Ok(Ok(path)) => saved_paths.push(path),
-            Ok(Err(_e)) => {
+            Ok(Err(e)) => {
+                log::warn!("[image] event=thumb_download_failed error={}", e);
             }
-            Err(_e) => {
+            Err(e) => {
+                log::warn!("[image] event=thumb_download_task_failed error={}", e);
             }
         }
     }

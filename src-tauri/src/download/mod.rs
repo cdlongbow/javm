@@ -28,7 +28,18 @@ pub fn sanitize_filename(name: &str) -> String {
 	let folded = cleaned.replace("..", "_");
 	let trimmed = folded.trim().trim_matches('.').trim();
 	if trimmed.is_empty() {
-		"download".to_string()
+		return "download".to_string();
+	}
+	// 规避 Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9，含带扩展名形式如 CON.txt）
+	let stem = trimmed.split('.').next().unwrap_or(trimmed);
+	let is_reserved = matches!(
+		stem.to_ascii_uppercase().as_str(),
+		"CON" | "PRN" | "AUX" | "NUL"
+			| "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+			| "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+	);
+	if is_reserved {
+		format!("_{}", trimmed)
 	} else {
 		trimmed.to_string()
 	}
