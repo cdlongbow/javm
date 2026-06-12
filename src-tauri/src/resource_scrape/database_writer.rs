@@ -172,31 +172,73 @@ impl DatabaseWriter {
         .map_err(|e| format!("Task join error: {}", e))?
     }
 
-    /// 将所有刮削数据写入数据库
+    /// 将所有刮削数据（元数据 + 演员 + 标签 + 分类）原子地写入数据库。
     ///
-    /// 依次调用 update_video_metadata、save_actors、save_tags
+    /// 全部操作在单连接、单事务内完成，任一步失败整体回滚，
+    /// 避免出现「元数据已更新但演员被清空未重插」之类的中间不一致状态。
     pub async fn write_all(
         &self,
         video_id: String,
         metadata: ScrapeMetadata,
         local_cover_image: String,
     ) -> Result<(), String> {
-        let actors = metadata.actors.clone();
-        let tags = metadata.tags.clone();
-        let genres = metadata.genres.clone();
+        let db_path = self.db_path.clone();
 
-        self.update_video_metadata(
-            video_id.clone(),
-            metadata,
-            local_cover_image,
-        )
-        .await?;
+        tokio::task::spawn_blocking(move || {
+            let mut conn = rusqlite::Connection::open(&db_path)
+                .map_err(|e| format!("Failed to open database: {}", e))?;
+            conn.busy_timeout(std::time::Duration::from_secs(5))
+                .map_err(|e| e.to_string())?;
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-        self.save_actors(video_id.clone(), actors).await?;
-        self.save_tags(video_id.clone(), tags).await?;
-        self.save_genres(video_id, genres).await?;
+            // 1. 视频元数据
+            let existing_duration: Option<i32> =
+                Database::get_video_duration(&tx, &video_id).map_err(|e| e.to_string())?;
+            let new_duration = resolve_scraped_duration(existing_duration, metadata.duration);
+            let update = crate::db::VideoScrapeUpdateData {
+                title: &metadata.title,
+                original_title: metadata.original_title.as_deref(),
+                studio: Some(metadata.studio.as_str()),
+                director: Some(metadata.director.as_str()),
+                premiered: Some(metadata.premiered.as_str()),
+                duration: new_duration,
+                rating: metadata.score,
+                poster: &local_cover_image,
+                local_id: Some(metadata.local_id.as_str()),
+            };
+            Database::update_video_scrape_info(&tx, &video_id, &update)
+                .map_err(|e| e.to_string())?;
 
-        Ok(())
+            // 2. 演员
+            Database::clear_video_actors(&tx, &video_id).map_err(|e| e.to_string())?;
+            for (idx, actor_name) in metadata.actors.iter().enumerate() {
+                let actor_id =
+                    Database::get_or_create_actor(&tx, actor_name).map_err(|e| e.to_string())?;
+                Database::add_video_actor(&tx, &video_id, actor_id, idx)
+                    .map_err(|e| e.to_string())?;
+            }
+
+            // 3. 标签
+            Database::clear_video_tags(&tx, &video_id).map_err(|e| e.to_string())?;
+            for tag_name in &metadata.tags {
+                let tag_id =
+                    Database::get_or_create_tag(&tx, tag_name).map_err(|e| e.to_string())?;
+                Database::add_video_tag(&tx, &video_id, tag_id).map_err(|e| e.to_string())?;
+            }
+
+            // 4. 分类
+            Database::clear_video_genres(&tx, &video_id).map_err(|e| e.to_string())?;
+            for genre_name in &metadata.genres {
+                let genre_id =
+                    Database::get_or_create_genre(&tx, genre_name).map_err(|e| e.to_string())?;
+                Database::add_video_genre(&tx, &video_id, genre_id).map_err(|e| e.to_string())?;
+            }
+
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
     }
 }
 
