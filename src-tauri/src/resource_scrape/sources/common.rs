@@ -3,11 +3,35 @@
 //! 提取自各数据源解析器中重复出现的公共函数，避免重复代码。
 
 use scraper::{Html, Selector};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, RwLock};
+
+/// 进程级选择器缓存：`Selector::parse` 对每个 CSS 选择器都要编译一次，
+/// 而各数据源解析每个页面会重复调用同样的字面量选择器（head meta + body 共百余处）。
+/// 这里按选择器字符串缓存已编译结果，首次见到编译一次，之后只读复用。
+/// 选择器字符串是有限的代码字面量集合，缓存大小天然有界。
+fn cached_selector(selector_str: &str) -> Option<Arc<Selector>> {
+    static CACHE: LazyLock<RwLock<HashMap<String, Arc<Selector>>>> =
+        LazyLock::new(|| RwLock::new(HashMap::new()));
+
+    // 读快路径：命中直接复用
+    if let Ok(guard) = CACHE.read() {
+        if let Some(sel) = guard.get(selector_str) {
+            return Some(sel.clone());
+        }
+    }
+
+    // 未命中：编译并写入（解析失败返回 None，与原 `.ok()?` 语义一致）
+    let sel = Arc::new(Selector::parse(selector_str).ok()?);
+    if let Ok(mut guard) = CACHE.write() {
+        guard.insert(selector_str.to_string(), sel.clone());
+    }
+    Some(sel)
+}
 
 /// 选取第一个匹配元素的文本内容
 pub fn select_text(doc: &Html, selector_str: &str) -> Option<String> {
-    let sel = Selector::parse(selector_str).ok()?;
+    let sel = cached_selector(selector_str)?;
     let el = doc.select(&sel).next()?;
     let text: String = el.text().collect::<Vec<_>>().join(" ");
     let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -16,9 +40,9 @@ pub fn select_text(doc: &Html, selector_str: &str) -> Option<String> {
 
 /// 选取所有匹配元素的文本内容
 pub fn select_all_text(doc: &Html, selector_str: &str) -> Vec<String> {
-    let sel = match Selector::parse(selector_str) {
-        Ok(s) => s,
-        Err(_) => return vec![],
+    let sel = match cached_selector(selector_str) {
+        Some(s) => s,
+        None => return vec![],
     };
     doc.select(&sel)
         .filter_map(|el| {
@@ -31,7 +55,7 @@ pub fn select_all_text(doc: &Html, selector_str: &str) -> Vec<String> {
 
 /// 选取第一个匹配元素的指定属性值
 pub fn select_attr(doc: &Html, selector_str: &str, attr: &str) -> Option<String> {
-    let sel = Selector::parse(selector_str).ok()?;
+    let sel = cached_selector(selector_str)?;
     doc.select(&sel)
         .next()
         .and_then(|el| el.value().attr(attr))
@@ -41,9 +65,9 @@ pub fn select_attr(doc: &Html, selector_str: &str, attr: &str) -> Option<String>
 
 /// 选取所有匹配元素的指定属性值
 pub fn select_all_attr(doc: &Html, selector_str: &str, attr: &str) -> Vec<String> {
-    let sel = match Selector::parse(selector_str) {
-        Ok(s) => s,
-        Err(_) => return vec![],
+    let sel = match cached_selector(selector_str) {
+        Some(s) => s,
+        None => return vec![],
     };
     doc.select(&sel)
         .filter_map(|el| el.value().attr(attr).map(|s| s.to_string()))
