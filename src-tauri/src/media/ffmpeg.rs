@@ -431,7 +431,10 @@ pub async fn capture_random_frames_streaming(
         match res {
             CaptureResult::Success => {
                 let path_str = output_path.to_string_lossy().to_string();
-                let _ = app.emit("capture-frame-ready", &path_str);
+                let _ = app.emit(
+                    "capture-frame-ready",
+                    serde_json::json!({ "path": path_str, "offset": offset }),
+                );
                 frame_paths.push(path_str);
             }
             CaptureResult::TimedOut => {
@@ -471,7 +474,10 @@ pub async fn capture_random_frames_streaming(
 
             if let CaptureResult::Success = result {
                 let path_str = output_path.to_string_lossy().to_string();
-                let _ = app.emit("capture-frame-ready", &path_str);
+                let _ = app.emit(
+                    "capture-frame-ready",
+                    serde_json::json!({ "path": path_str, "offset": offset }),
+                );
                 frame_paths.push(path_str);
             }
         }
@@ -490,7 +496,10 @@ pub async fn capture_random_frames_streaming(
 
         if let Ok(CaptureResult::Success) = res {
             let path_str = fallback_path.to_string_lossy().to_string();
-            let _ = app.emit("capture-frame-ready", &path_str);
+            let _ = app.emit(
+                "capture-frame-ready",
+                serde_json::json!({ "path": path_str, "offset": 1.0 }),
+            );
             frame_paths.push(path_str);
         } else {
             let _ = app.emit("capture-done", serde_json::json!({ "count": 0 }));

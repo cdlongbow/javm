@@ -36,10 +36,15 @@ const isOpen = computed({
     set: (val) => emit('update:open', val),
 })
 
+interface CapturedFrame {
+    path: string
+    offset: number // 该帧在视频中的时间点（秒），用于按时间排序
+}
+
 const loading = ref(false)
-const frames = ref<string[]>([])
-const selectedIndex = ref<number | null>(null)
-const selectedIndices = ref<Set<number>>(new Set())
+const frames = ref<CapturedFrame[]>([])
+const selectedKey = ref<string | null>(null) // 单选：选中帧的路径
+const selectedKeys = ref<Set<string>>(new Set()) // 多选：选中帧的路径集合
 const captureStatus = ref('')
 const captureDone = ref(false) // 截图是否全部完成
 
@@ -47,10 +52,13 @@ const captureDone = ref(false) // 截图是否全部完成
 let unlistenFrame: UnlistenFn | null = null
 let unlistenDone: UnlistenFn | null = null
 
+// 帧并发截取、完成先后不定，这里按时间点排序后展示，保证 10 张图按时间顺序排列
+const sortedFrames = computed(() =>
+    [...frames.value].sort((a, b) => a.offset - b.offset)
+)
+
 // 转换帧路径为可显示的 URL
-const frameUrls = computed(() => {
-    return frames.value.map(path => convertFileSrc(path.replace(/\\/g, '/')))
-})
+const toFrameUrl = (path: string) => convertFileSrc(path.replace(/\\/g, '/'))
 
 // 设置事件监听
 const setupListeners = async () => {
@@ -58,12 +66,12 @@ const setupListeners = async () => {
     await cleanupListeners()
 
     // 监听每一帧截图完成
-    unlistenFrame = await listen<string>('capture-frame-ready', (event) => {
-        frames.value.push(event.payload)
+    unlistenFrame = await listen<{ path: string; offset: number }>('capture-frame-ready', (event) => {
+        frames.value.push({ path: event.payload.path, offset: event.payload.offset })
         // 多选模式下自动选中新帧
         if (props.mode === 'multiple') {
-            selectedIndices.value.add(frames.value.length - 1)
-            selectedIndices.value = new Set(selectedIndices.value)
+            selectedKeys.value.add(event.payload.path)
+            selectedKeys.value = new Set(selectedKeys.value)
         }
     })
 
@@ -97,8 +105,8 @@ const captureFrames = async () => {
     loading.value = true
     captureDone.value = false
     frames.value = []
-    selectedIndex.value = null
-    selectedIndices.value = new Set()
+    selectedKey.value = null
+    selectedKeys.value = new Set()
     captureStatus.value = '正在截取视频帧...'
 
     // 先设置监听器，再发起截图
@@ -143,33 +151,33 @@ const stopCapture = async () => {
     }
 }
 
-// 选择帧
-const selectFrame = (index: number) => {
+// 选择帧（以帧路径为标识，避免排序/插入导致选中错位）
+const selectFrame = (path: string) => {
     if (props.mode === 'single') {
-        selectedIndex.value = index
+        selectedKey.value = path
     } else {
-        if (selectedIndices.value.has(index)) {
-            selectedIndices.value.delete(index)
+        if (selectedKeys.value.has(path)) {
+            selectedKeys.value.delete(path)
         } else {
-            selectedIndices.value.add(index)
+            selectedKeys.value.add(path)
         }
-        selectedIndices.value = new Set(selectedIndices.value)
+        selectedKeys.value = new Set(selectedKeys.value)
     }
 }
 
 // 判断帧是否被选中
-const isFrameSelected = (index: number) => {
+const isFrameSelected = (path: string) => {
     if (props.mode === 'single') {
-        return selectedIndex.value === index
+        return selectedKey.value === path
     } else {
-        return selectedIndices.value.has(index)
+        return selectedKeys.value.has(path)
     }
 }
 
 // 确认选择（同时停止后台截图）
 const confirmSelection = async () => {
     if (props.mode === 'single') {
-        if (selectedIndex.value === null) {
+        if (selectedKey.value === null) {
             toast.error('请先选择一个封面')
             return
         }
@@ -182,7 +190,7 @@ const confirmSelection = async () => {
         loading.value = true
 
         try {
-            const selectedFrame = frames.value[selectedIndex.value]
+            const selectedFrame = selectedKey.value
             const result = await invoke<{ thumbPath: string; videoPath: string }>('save_captured_cover', {
                 videoId: props.videoId,
                 videoPath: props.videoPath,
@@ -199,7 +207,7 @@ const confirmSelection = async () => {
             loading.value = false
         }
     } else {
-        if (selectedIndices.value.size === 0) {
+        if (selectedKeys.value.size === 0) {
             toast.error('请至少选择一张预览图')
             return
         }
@@ -212,7 +220,7 @@ const confirmSelection = async () => {
         loading.value = true
 
         try {
-            const selectedFrames = Array.from(selectedIndices.value).map(idx => frames.value[idx])
+            const selectedFrames = Array.from(selectedKeys.value)
             const result = await invoke<{ thumbPaths: string[]; videoPath: string }>('save_captured_thumbs', {
                 videoId: props.videoId,
                 videoPath: props.videoPath,
@@ -240,8 +248,8 @@ const handleOpenChange = (open: boolean) => {
         }
         cleanupListeners()
         frames.value = []
-        selectedIndex.value = null
-        selectedIndices.value = new Set()
+        selectedKey.value = null
+        selectedKeys.value = new Set()
         captureStatus.value = ''
         captureDone.value = false
     }
@@ -281,19 +289,19 @@ onUnmounted(() => {
                 <ScrollArea v-else-if="frames.length > 0" class="h-full">
                     <div class="grid grid-cols-2 gap-4">
                         <div
-                            v-for="(frameUrl, index) in frameUrls"
-                            :key="index"
+                            v-for="(frame, index) in sortedFrames"
+                            :key="frame.path"
                             class="group relative aspect-video rounded-lg overflow-hidden border-2 cursor-pointer transition-all bg-black/5"
-                            :class="isFrameSelected(index) ? 'border-primary ring-2 ring-primary' : 'border-border'"
-                            @click="selectFrame(index)"
+                            :class="isFrameSelected(frame.path) ? 'border-primary ring-2 ring-primary' : 'border-border'"
+                            @click="selectFrame(frame.path)"
                         >
                             <img
-                                :src="frameUrl"
+                                :src="toFrameUrl(frame.path)"
                                 class="w-full h-full object-contain"
                                 alt="视频帧"
                             />
                             <div
-                                v-if="isFrameSelected(index)"
+                                v-if="isFrameSelected(frame.path)"
                                 class="absolute top-2 left-2 size-7 rounded-full bg-primary flex items-center justify-center shadow-md"
                             >
                                 <Check class="size-4 text-primary-foreground" />
@@ -344,9 +352,9 @@ onUnmounted(() => {
                 </Button>
                 <Button
                     @click="confirmSelection"
-                    :disabled="props.mode === 'single' ? selectedIndex === null : selectedIndices.size === 0"
+                    :disabled="props.mode === 'single' ? selectedKey === null : selectedKeys.size === 0"
                 >
-                    确认{{ props.mode === 'multiple' && selectedIndices.size > 0 ? ` (${selectedIndices.size})` : '' }}
+                    确认{{ props.mode === 'multiple' && selectedKeys.size > 0 ? ` (${selectedKeys.size})` : '' }}
                 </Button>
                 <Button
                     variant="outline"
