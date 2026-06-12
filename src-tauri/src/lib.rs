@@ -235,6 +235,21 @@ pub fn run() {
                 .unwrap_or(3);
             app.manage(download::manager::DownloadManager::new(download_concurrent));
 
+            // 恢复上次未完成的下载任务（进程已随退出终止，需重新入队调度）
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) =
+                        download::commands::resume_pending_downloads(app_handle).await
+                    {
+                        log::warn!(
+                            "[startup] event=resume_pending_downloads_failed error={}",
+                            e
+                        );
+                    }
+                });
+            }
+
             // 初始化资源刮削状态
             app.manage(resource_scrape::commands::RsTaskQueueState::new());
             app.manage(resource_scrape::fetcher::WebviewPoolState::default());

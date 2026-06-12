@@ -1,6 +1,6 @@
 use regex::Regex;
 use serde::Serialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -78,6 +78,8 @@ pub struct DownloadManager {
     queue: Arc<Mutex<VecDeque<DownloadTask>>>,
     active_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     active_processes: Arc<Mutex<HashMap<String, Arc<Mutex<Option<tokio::process::Child>>>>>>,
+    // 已入队或正在执行（含等待并发名额）的任务 id 集合，用于防止同一任务重复入队产生多进程
+    enqueued: Arc<Mutex<HashSet<String>>>,
     semaphore: Arc<Semaphore>,
     max_concurrent: Arc<AtomicUsize>,
     pending_permits_to_forget: Arc<AtomicUsize>,
@@ -90,6 +92,7 @@ impl DownloadManager {
             queue: Arc::new(Mutex::new(VecDeque::new())),
             active_tasks: Arc::new(Mutex::new(HashMap::new())),
             active_processes: Arc::new(Mutex::new(HashMap::new())),
+            enqueued: Arc::new(Mutex::new(HashSet::new())),
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             max_concurrent: Arc::new(AtomicUsize::new(max_concurrent)),
             pending_permits_to_forget: Arc::new(AtomicUsize::new(0)),
@@ -130,6 +133,12 @@ impl DownloadManager {
     }
 
     pub async fn stop_task(&self, task_id: &str) -> Result<(), String> {
+        // 0. 从去重集合移除，使其后续可被重新入队（重试/重新下载）
+        {
+            let mut enqueued = self.enqueued.lock().await;
+            enqueued.remove(task_id);
+        }
+
         // 1. 从队列中移除任务（如果还在队列中）
         {
             let mut queue = self.queue.lock().await;
@@ -163,6 +172,10 @@ impl DownloadManager {
             let mut queue = self.queue.lock().await;
             queue.clear();
         }
+        {
+            let mut enqueued = self.enqueued.lock().await;
+            enqueued.clear();
+        }
 
         let task_ids = {
             let active = self.active_tasks.lock().await;
@@ -174,9 +187,20 @@ impl DownloadManager {
         }
     }
 
-    pub async fn add_task(&self, task: DownloadTask) {
+    /// 将任务加入队列。
+    ///
+    /// 若该任务 id 已在队列中或正在执行（含等待并发名额），则跳过并返回 `false`，
+    /// 避免同一任务被重复调度而产生多个下载进程。成功入队返回 `true`。
+    pub async fn add_task(&self, task: DownloadTask) -> bool {
+        {
+            let mut enqueued = self.enqueued.lock().await;
+            if !enqueued.insert(task.id.clone()) {
+                return false;
+            }
+        }
         let mut queue = self.queue.lock().await;
         queue.push_back(task);
+        true
     }
 
     pub fn schedule_next(
@@ -213,6 +237,10 @@ impl DownloadManager {
                         {
                             let mut active = manager_state.active_tasks.lock().await;
                             active.remove(&task_id);
+                        }
+                        {
+                            let mut enqueued = manager_state.enqueued.lock().await;
+                            enqueued.remove(&task_id);
                         }
 
                         let app_next = app_state.clone();

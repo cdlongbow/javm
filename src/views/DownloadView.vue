@@ -228,12 +228,14 @@ const stats = computed(() => ({
 
 // 批量操作
 const handleBatchStop = async () => {
-  // 停止所有未完成的任务（不包括已完成的）
-  const incompleteTasks = downloadStore.tasks.filter(t => t.status !== 'completed')
+  // 有勾选时只停止勾选的任务，否则停止全部未完成任务（均排除已完成）
+  const hasSelection = downloadStore.selectedIds.length > 0
+  const source = hasSelection ? downloadStore.selectedTasks : downloadStore.tasks
+  const incompleteTasks = source.filter(t => t.status !== 'completed')
   const taskIds = incompleteTasks.map(t => t.id)
 
   if (taskIds.length === 0) {
-    toast.info('没有任务需要停止')
+    toast.info(hasSelection ? '勾选的任务都已完成，无需停止' : '没有任务需要停止')
     return
   }
 
@@ -247,12 +249,14 @@ const handleBatchStop = async () => {
 }
 
 const handleBatchRetry = async () => {
-  // 重试所有未完成的任务（不管是否选中）
-  const incompleteTasks = downloadStore.tasks.filter(t => t.status !== 'completed')
+  // 有勾选时只开始勾选的任务，否则开始全部未完成任务（均排除已完成）
+  const hasSelection = downloadStore.selectedIds.length > 0
+  const source = hasSelection ? downloadStore.selectedTasks : downloadStore.tasks
+  const incompleteTasks = source.filter(t => t.status !== 'completed')
   const taskIds = incompleteTasks.map(t => t.id)
 
   if (taskIds.length === 0) {
-    toast.info('没有任务需要开始')
+    toast.info(hasSelection ? '勾选的任务都已完成，无需开始' : '没有任务需要开始')
     return
   }
 

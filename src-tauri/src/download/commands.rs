@@ -323,6 +323,101 @@ pub async fn sync_completed_download_to_library(app: AppHandle, task_id: String)
     Ok(true)
 }
 
+/// 应用启动时恢复上次未完成的下载任务。
+///
+/// 下载进程随应用退出而终止，但内存队列在重启后为空，DB 中仍残留
+/// 排队中/准备中/下载中/合并中的任务。这里把它们统一重置为排队中并重新入队调度，
+/// 否则这些任务会一直停滞，表现为“设置了并发数却没有任务在跑”。
+pub async fn resume_pending_downloads(app: AppHandle) -> Result<(), String> {
+    let db = Database::new(&app).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+
+    let pending: Vec<(String, String, String, Option<String>)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, url, save_path, filename FROM downloads
+                 WHERE status IN (0, 1, 2, 3) ORDER BY created_at ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| e.to_string())?);
+        }
+        out
+    };
+
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    // 统一重置为排队中，避免界面残留“下载中/合并中”但进程实际已不存在
+    conn.execute(
+        "UPDATE downloads SET status = 0, updated_at = datetime('now') WHERE status IN (1, 2, 3)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let Some(manager) = app.try_state::<crate::download::manager::DownloadManager>() else {
+        return Err("DownloadManager not initialized".to_string());
+    };
+
+    for (id, url, save_path, filename) in pending {
+        let task = crate::download::manager::DownloadTask {
+            id,
+            url,
+            save_path,
+            filename,
+        };
+        if manager.add_task(task).await {
+            let app_clone = app.clone();
+            let manager_clone = manager.inner().clone();
+            tokio::spawn(async move {
+                manager_clone.schedule_next(app_clone).await;
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// 为同一保存目录下的文件名生成不冲突的名称。
+///
+/// 下载目录按 `{save_path}/{filename}/` 拼接，若多个任务（如同一番号的多个数据源链接）
+/// 共用文件名，会下载到同一目录、共用 `.tmp` 分片目录与同名成品而互相覆盖/损坏。
+/// 此处在已存在同名任务时追加 `_2`、`_3` …… 使每个任务拥有独立目录。
+fn dedupe_filename_in_save_path(
+    conn: &rusqlite::Connection,
+    save_path: &str,
+    base: &str,
+) -> Result<String, String> {
+    let exists = |name: &str| -> Result<bool, String> {
+        conn.query_row(
+            "SELECT COUNT(*) > 0 FROM downloads WHERE save_path = ? AND filename = ?",
+            rusqlite::params![save_path, name],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|e| format!("查询同名任务失败: {}", e))
+    };
+
+    if !exists(base)? {
+        return Ok(base.to_string());
+    }
+
+    let mut index = 2;
+    loop {
+        let candidate = format!("{}_{}", base, index);
+        if !exists(&candidate)? {
+            return Ok(candidate);
+        }
+        index += 1;
+    }
+}
+
 #[tauri::command]
 pub async fn add_download_task(
     app: AppHandle,
@@ -350,9 +445,13 @@ pub async fn add_download_task(
     }
 
     let id = Uuid::new_v4().to_string();
-    let filename_to_save = filename
+    let filename_to_save = match filename
         .or_else(|| extract_filename_from_url(&url))
-        .map(|name| super::sanitize_filename(&name));
+        .map(|name| super::sanitize_filename(&name))
+    {
+        Some(base) => Some(dedupe_filename_in_save_path(&conn, &save_path, &base)?),
+        None => None,
+    };
 
     conn.execute(
         "INSERT INTO downloads (id, url, save_path, filename, status, created_at, updated_at)
@@ -370,13 +469,13 @@ pub async fn add_download_task(
             save_path: save_path.clone(),
             filename: filename_to_save.clone(),
         };
-        manager.add_task(task).await;
-
-        let app_clone = app.clone();
-        let manager_clone = manager.inner().clone();
-        tokio::spawn(async move {
-            manager_clone.schedule_next(app_clone).await;
-        });
+        if manager.add_task(task).await {
+            let app_clone = app.clone();
+            let manager_clone = manager.inner().clone();
+            tokio::spawn(async move {
+                manager_clone.schedule_next(app_clone).await;
+            });
+        }
     } else {
         return Err("DownloadManager not initialized".to_string());
     }
@@ -443,13 +542,13 @@ pub async fn resume_download_task(app: AppHandle, task_id: String) -> Result<(),
             save_path,
             filename,
         };
-        manager.add_task(task).await;
-
-        let app_clone = app.clone();
-        let manager_clone = manager.inner().clone();
-        tokio::spawn(async move {
-            manager_clone.schedule_next(app_clone).await;
-        });
+        if manager.add_task(task).await {
+            let app_clone = app.clone();
+            let manager_clone = manager.inner().clone();
+            tokio::spawn(async move {
+                manager_clone.schedule_next(app_clone).await;
+            });
+        }
     } else {
         return Err("DownloadManager not initialized".to_string());
     }
@@ -503,18 +602,23 @@ pub async fn retry_download_task(app: AppHandle, task_id: String) -> Result<(), 
     let db = Database::new(&app).map_err(|e| e.to_string())?;
     let conn = db.get_connection().map_err(|e| e.to_string())?;
 
-    let (url, save_path, filename): (String, String, Option<String>) = conn
+    let (url, save_path, filename, status): (String, String, Option<String>, i32) = conn
         .query_row(
-            "SELECT url, save_path, filename FROM downloads WHERE id = ?",
+            "SELECT url, save_path, filename, status FROM downloads WHERE id = ?",
             [&task_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
-        .map_err(|e| {
-            e.to_string()
-        })?;
+        .map_err(|e| e.to_string())?;
+
+    // 若任务正在准备/下载/合并中，先停止旧进程，避免重复下载与孤儿进程
+    if matches!(status, 1 | 2 | 3) {
+        if let Some(manager) = app.try_state::<crate::download::manager::DownloadManager>() {
+            let _ = manager.stop_task(&task_id).await;
+        }
+    }
 
     conn.execute(
-        "UPDATE downloads SET status = 0, downloaded_bytes = 0, error_message = NULL,
+        "UPDATE downloads SET status = 0, downloaded_bytes = 0, progress = 0, error_message = NULL,
          retry_count = retry_count + 1, updated_at = datetime('now') WHERE id = ?",
         [&task_id],
     )
@@ -529,13 +633,13 @@ pub async fn retry_download_task(app: AppHandle, task_id: String) -> Result<(), 
             save_path,
             filename,
         };
-        manager.add_task(task).await;
-
-        let app_clone = app.clone();
-        let manager_clone = manager.inner().clone();
-        tokio::spawn(async move {
-            manager_clone.schedule_next(app_clone).await;
-        });
+        if manager.add_task(task).await {
+            let app_clone = app.clone();
+            let manager_clone = manager.inner().clone();
+            tokio::spawn(async move {
+                manager_clone.schedule_next(app_clone).await;
+            });
+        }
     } else {
         return Err("DownloadManager not initialized".to_string());
     }
@@ -658,12 +762,13 @@ pub async fn rename_download_task(
                     save_path: save_path.clone(),
                     filename: Some(new_filename.clone()),
                 };
-                manager.add_task(task).await;
-                let app_clone = app.clone();
-                let manager_clone = manager.inner().clone();
-                tokio::spawn(async move {
-                    manager_clone.schedule_next(app_clone).await;
-                });
+                if manager.add_task(task).await {
+                    let app_clone = app.clone();
+                    let manager_clone = manager.inner().clone();
+                    tokio::spawn(async move {
+                        manager_clone.schedule_next(app_clone).await;
+                    });
+                }
             }
         }
         _ => {
@@ -753,12 +858,13 @@ pub async fn change_download_save_path(
                     save_path: new_save_path.clone(),
                     filename,
                 };
-                manager.add_task(task).await;
-                let app_clone = app.clone();
-                let manager_clone = manager.inner().clone();
-                tokio::spawn(async move {
-                    manager_clone.schedule_next(app_clone).await;
-                });
+                if manager.add_task(task).await {
+                    let app_clone = app.clone();
+                    let manager_clone = manager.inner().clone();
+                    tokio::spawn(async move {
+                        manager_clone.schedule_next(app_clone).await;
+                    });
+                }
             }
         }
         _ => {
