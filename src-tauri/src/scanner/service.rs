@@ -105,6 +105,27 @@ impl ScannerService {
             current_file: String::new(),
         });
 
+        // 预扫描：廉价遍历找出"内容已变更"的视频文件，随后并行预提取重活
+        // （fast_hash + ffmpeg 元数据），把串行瓶颈摊到多核上。
+        let db_pre = self.db.clone();
+        let path_pre = path.to_string();
+        let changed_files = tauri::async_runtime::spawn_blocking(
+            move || -> Result<Vec<(String, u64, Option<i64>)>, String> {
+                let conn = db_pre
+                    .get_connection()
+                    .map_err(|e| format!("获取数据库连接失败: {}", e))?;
+                let existing_map = Database::get_existing_video_scan_info_map(&conn, &path_pre)
+                    .map_err(|e| format!("预加载视频扫描信息失败: {}", e))?;
+                let mut out = Vec::new();
+                collect_changed_files(Path::new(&path_pre), &existing_map, &mut out);
+                Ok(out)
+            },
+        )
+        .await
+        .map_err(|e| format!("预扫描任务执行失败: {}", e))??;
+
+        let media_cache = build_media_cache(changed_files).await;
+
         // 数据库操作是同步的，放到阻塞线程中执行
         let db = self.db.clone();
         let path_string = path.to_string();
@@ -112,7 +133,14 @@ impl ScannerService {
 
         let summary = tauri::async_runtime::spawn_blocking(move || {
             // cover_tx 被 move 进来，scan 结束后自动 drop → 关闭 channel
-            Self::scan_directory_blocking(&db, &path_string, total_files, progress_callback, cover_tx)
+            Self::scan_directory_blocking(
+                &db,
+                &path_string,
+                total_files,
+                progress_callback,
+                cover_tx,
+                &media_cache,
+            )
         })
         .await
         .map_err(|e| format!("扫描任务执行失败: {}", e))??;
@@ -127,6 +155,7 @@ impl ScannerService {
         total_files: u32,
         progress_callback: std::sync::Arc<F>,
         cover_tx: Option<CoverTaskSender>,
+        media_cache: &HashMap<String, PreparedMedia>,
     ) -> Result<ScanSummary, String>
     where
         F: Fn(ScanProgress) + Send + Sync + 'static,
@@ -158,6 +187,7 @@ impl ScannerService {
             total_files,
             &*progress_callback,
             cover_tx.as_ref(),
+            media_cache,
         )?;
 
         // 批量删除磁盘上已不存在的文件记录
@@ -196,6 +226,7 @@ impl ScannerService {
         total: u32,
         progress_callback: &dyn Fn(ScanProgress),
         cover_tx: Option<&CoverTaskSender>,
+        media_cache: &HashMap<String, PreparedMedia>,
     ) -> Result<ScanSummary, String> {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
@@ -243,11 +274,11 @@ impl ScannerService {
 
             if path.is_dir() {
                 let child_summary =
-                    Self::scan_recursive(&path, tx, existing, existing_map, current, total, progress_callback, cover_tx)?;
+                    Self::scan_recursive(&path, tx, existing, existing_map, current, total, progress_callback, cover_tx, media_cache)?;
                 summary.success_count += child_summary.success_count;
                 summary.failed_count += child_summary.failed_count;
             } else {
-                match Self::process_file(&path, tx, existing, existing_map, cover_tx) {
+                match Self::process_file(&path, tx, existing, existing_map, cover_tx, media_cache) {
                     Ok(true) => {
                         summary.success_count += 1;
                         *current += 1;
@@ -289,6 +320,7 @@ impl ScannerService {
         existing_paths: &mut HashSet<String>,
         existing_map: &mut HashMap<String, crate::db::ExistingVideoScanInfo>,
         cover_tx: Option<&CoverTaskSender>,
+        media_cache: &HashMap<String, PreparedMedia>,
     ) -> Result<bool, String> {
         if !should_scan_as_video(file_path) {
             return Ok(false);
@@ -369,8 +401,20 @@ impl ScannerService {
             .map(|existing_info| existing_info.nfo_mtime != nfo_mtime)
             .unwrap_or(true);
 
+        // 内容变更时优先用预提取缓存（需大小/mtime 校验一致），否则当场计算
+        let cached = if file_content_changed {
+            media_cache
+                .get(&path_str)
+                .filter(|c| c.file_size == file_size && c.file_mtime == file_mtime)
+        } else {
+            None
+        };
+
         let fast_hash = if file_content_changed {
-            calculate_fast_hash(file_path)?
+            match cached {
+                Some(c) => c.fast_hash.clone(),
+                None => calculate_fast_hash(file_path)?,
+            }
         } else {
             existing
                 .as_ref()
@@ -379,21 +423,27 @@ impl ScannerService {
         };
 
         let mut duration = if file_content_changed {
-            None
+            cached.and_then(|c| c.duration)
         } else {
             existing.as_ref().and_then(|existing_info| existing_info.duration)
         };
 
         let resolution = if file_content_changed {
-            let media_meta = metadata::extract_metadata(file_path).unwrap_or(metadata::VideoMetadata {
-                duration: None,
-                width: None,
-                height: None,
-            });
-            duration = media_meta.duration.map(|d| d as i32);
-            match (media_meta.width, media_meta.height) {
-                (Some(w), Some(h)) => Some(format!("{}x{}", w, h)),
-                _ => None,
+            match cached {
+                Some(c) => c.resolution.clone(),
+                None => {
+                    let media_meta =
+                        metadata::extract_metadata(file_path).unwrap_or(metadata::VideoMetadata {
+                            duration: None,
+                            width: None,
+                            height: None,
+                        });
+                    duration = media_meta.duration.map(|d| d as i32);
+                    match (media_meta.width, media_meta.height) {
+                        (Some(w), Some(h)) => Some(format!("{}x{}", w, h)),
+                        _ => None,
+                    }
+                }
             }
         } else {
             existing
@@ -610,6 +660,136 @@ fn adler32(data: &[u8], start: u32) -> u32 {
         b = (b + a) % 65521;
     }
     (b << 16) | a
+}
+
+/// 预提取的重活结果（fast_hash + ffmpeg 时长/分辨率）
+///
+/// 以 (file_size, file_mtime) 作为有效性校验：预提取阶段与主扫描阶段之间
+/// 文件若发生变化（大小或 mtime 不一致），主扫描会丢弃缓存改为当场计算，
+/// 因此缓存仅影响并行加速程度，绝不影响结果正确性。
+struct PreparedMedia {
+    file_size: u64,
+    file_mtime: Option<i64>,
+    fast_hash: String,
+    duration: Option<i32>,
+    resolution: Option<String>,
+}
+
+/// 廉价遍历目录树，收集"内容已变更"（新增或大小/mtime 变化）的视频文件清单。
+///
+/// 只做 readdir + stat，不触碰 ffmpeg/哈希，供后续并行预提取使用。
+/// 跳过规则与 `scan_recursive` 保持一致（符号链接、隐藏项、跳过目录、非视频、空文件）。
+fn collect_changed_files(
+    dir: &Path,
+    existing_map: &HashMap<String, crate::db::ExistingVideoScanInfo>,
+    out: &mut Vec<(String, u64, Option<i64>)>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        // 跳过符号链接，防止无限递归
+        if entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false) {
+            continue;
+        }
+
+        // 跳过隐藏文件/目录
+        if let Some(name) = path.file_name() {
+            if name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+        }
+
+        if path.is_dir() {
+            if is_skipped_directory(&path) {
+                continue;
+            }
+            collect_changed_files(&path, existing_map, out);
+        } else {
+            if !should_scan_as_video(&path) {
+                continue;
+            }
+            let meta = match path.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let size = meta.len();
+            if size == 0 {
+                continue;
+            }
+            let mtime = system_time_to_millis(meta.modified().ok());
+            let path_str = path.to_string_lossy().to_string();
+            let changed = existing_map
+                .get(&path_str)
+                .map(|info| info.file_size != size || info.file_mtime != mtime)
+                .unwrap_or(true);
+            if changed {
+                out.push((path_str, size, mtime));
+            }
+        }
+    }
+}
+
+/// 对变更文件清单做有界并发的重活预提取（fast_hash + ffmpeg 元数据）。
+///
+/// 返回按路径索引的缓存。哈希失败的文件不入缓存（主扫描会当场重算并正确报错）；
+/// ffmpeg 元数据失败按"无元数据"处理（与原逻辑一致，不影响入缓存）。
+async fn build_media_cache(
+    files: Vec<(String, u64, Option<i64>)>,
+) -> HashMap<String, PreparedMedia> {
+    let concurrency = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 8);
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let mut set: tokio::task::JoinSet<Option<(String, PreparedMedia)>> = tokio::task::JoinSet::new();
+
+    for (path_str, size, mtime) in files {
+        let sem = semaphore.clone();
+        set.spawn(async move {
+            let _permit = sem.acquire_owned().await.ok()?;
+            tokio::task::spawn_blocking(move || {
+                let path = Path::new(&path_str);
+                // 哈希失败则不缓存，交回主扫描当场处理（保持原有的失败语义）
+                let fast_hash = calculate_fast_hash(path).ok()?;
+                let (duration, resolution) = match metadata::extract_metadata(path) {
+                    Ok(m) => (
+                        m.duration.map(|d| d as i32),
+                        match (m.width, m.height) {
+                            (Some(w), Some(h)) => Some(format!("{}x{}", w, h)),
+                            _ => None,
+                        },
+                    ),
+                    Err(_) => (None, None),
+                };
+                Some((
+                    path_str,
+                    PreparedMedia {
+                        file_size: size,
+                        file_mtime: mtime,
+                        fast_hash,
+                        duration,
+                        resolution,
+                    },
+                ))
+            })
+            .await
+            .ok()
+            .flatten()
+        });
+    }
+
+    let mut map = HashMap::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(Some((path, prepared))) = joined {
+            map.insert(path, prepared);
+        }
+    }
+    map
 }
 
 /// 计算文件的快速哈希（基于文件大小 + 头尾各 4KB 的 Adler-32）
