@@ -18,7 +18,7 @@ const DEFAULT_MAX_CONCURRENT: usize = 5;
 
 /// 创建默认的 wreq HTTP 客户端（Chrome TLS 指纹 + 代理）
 fn default_client() -> Result<HttpClient, String> {
-    crate::resource_scrape::fingerprint_client::create_client()
+    crate::resource_scrape::fingerprint_client::shared_client()
 }
 
 /// 下载单张图片并保存到指定路径

@@ -286,7 +286,7 @@ pub async fn rs_search_resource(
     );
 
     analytics::record_search_designation(&app);
-    let http_client = fingerprint_client::create_client()?;
+    let http_client = fingerprint_client::shared_client()?;
     log::info!("[scrape_search] event=http_client_ready fingerprint=chrome_tls");
 
     let app_settings = settings::get_settings(app.clone()).await.unwrap_or_default();
@@ -577,7 +577,7 @@ pub async fn rs_cancel_search(
 /// 用于解决防盗链问题（如 projectjav 的封面图）
 #[tauri::command]
 pub async fn rs_proxy_image(url: String) -> Result<String, String> {
-    let client = fingerprint_client::create_client()?;
+    let client = fingerprint_client::shared_client()?;
     proxy_image_to_file(&client, &url).await
 }
 

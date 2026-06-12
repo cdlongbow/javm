@@ -31,6 +31,32 @@ pub fn create_client() -> Result<Client, String> {
         .map_err(|e| format!("创建 wreq 客户端失败: {}", e))
 }
 
+/// 进程级共享 Client：复用连接池/TLS session，避免每次刮削/搜索/下载重建指纹
+/// Client（BoringSSL 指纹构建较贵，且重建会丢掉同站点跨阶段的 keep-alive）。
+/// 按当前代理设置缓存，代理变更（与缓存不一致）时自动重建。
+pub fn shared_client() -> Result<Client, String> {
+    use std::sync::RwLock;
+    static SHARED: RwLock<Option<(Option<url::Url>, Client)>> = RwLock::new(None);
+
+    let current_proxy = crate::utils::proxy::get_proxy_url();
+
+    // 快路径：代理未变则直接复用
+    if let Ok(guard) = SHARED.read() {
+        if let Some((proxy, client)) = guard.as_ref() {
+            if *proxy == current_proxy {
+                return Ok(client.clone());
+            }
+        }
+    }
+
+    // 慢路径：重建并缓存
+    let client = create_client()?;
+    if let Ok(mut guard) = SHARED.write() {
+        *guard = Some((current_proxy, client.clone()));
+    }
+    Ok(client)
+}
+
 /// 请求指定 URL 并返回 HTML 文本
 pub async fn fetch_html(client: &Client, url: &str) -> Result<String, String> {
     let resp = client
