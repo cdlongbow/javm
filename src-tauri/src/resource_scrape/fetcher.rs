@@ -27,11 +27,11 @@ pub struct Fetcher {
     http_client: wreq::Client,
 }
 
-/// WebView 获取超时时间（秒）
-const WEBVIEW_TIMEOUT_SECS: u64 = 60;
+/// WebView 获取超时时间（秒）。dev 下放长，便于手动调试。
+const WEBVIEW_TIMEOUT_SECS: u64 = if cfg!(debug_assertions) { 180 } else { 60 };
 
-/// Cloudflare 手动验证超时时间（秒）
-const CF_MANUAL_TIMEOUT_SECS: u64 = 60;
+/// Cloudflare / 年龄门手动验证超时时间（秒）。手动点击需要时间，dev 下给足。
+const CF_MANUAL_TIMEOUT_SECS: u64 = if cfg!(debug_assertions) { 300 } else { 180 };
 
 /// 前端刮削 CF 状态事件
 const RESOURCE_SCRAPE_CF_STATE_EVENT: &str = "resource-scrape-cf-state";
@@ -610,7 +610,11 @@ fn get_or_create_webview_window(
 
     // 首次创建隐藏窗口
     let data_directory = webview_support::persistent_data_directory(app)?;
-    let anti_detection_js = webview_support::build_anti_detection_script();
+    // 实验三：完全不注入任何脚本，WebView2 保持 100% 原生。
+    // - navigator.webdriver 由启动参数 --disable-blink-features=AutomationControlled
+    //   原生置为 false；用 defineProperty 改写反而会被 Turnstile 检出（getter 非
+    //   native，且返回 undefined 而非 false 本身就是异常信号）。
+    // - 不覆盖 UA：用引擎真实 UA，与真实 Client Hints(Sec-CH-UA) 保持一致。
     let builder = WebviewWindowBuilder::new(
         app,
         label,
@@ -618,9 +622,10 @@ fn get_or_create_webview_window(
     )
     .title(&format!("资源刮削 - {}", site_name))
     .inner_size(1024.0, 768.0)
+    // 限制最小尺寸并居中：避免被缩得太小导致 CF Turnstile 渲染不出来/无法点击
+    .min_inner_size(1024.0, 768.0)
+    .center()
     .visible(false)
-    .user_agent(webview_support::WEBVIEW_USER_AGENT)
-    .initialization_script(&anti_detection_js)
     .data_directory(data_directory);
 
     #[cfg(target_os = "windows")]
@@ -648,8 +653,10 @@ fn normalize_site_key(site_id: &str) -> String {
 /// 用 WebView 重试不会改变结果，应直接跳过回退。
 fn is_http_client_error(err: &str) -> bool {
     if let Some(rest) = err.strip_prefix("HTTP ") {
-        // 状态码格式："HTTP 404 Not Found" 或 "HTTP 403 Forbidden"
-        rest.starts_with('4')
+        // 4xx 视为"资源不存在/硬错误"，跳过 WebView 重试。
+        // 但 403 多为 Cloudflare 挑战或反爬拦截，应交给 WebView 处理（解挑战/
+        // 过年龄门），故排除在外，让其走 WebView 回退。
+        rest.starts_with('4') && !rest.starts_with("403")
     } else {
         false
     }
@@ -743,9 +750,10 @@ mod tests {
     #[test]
     fn should_detect_http_client_errors() {
         assert!(is_http_client_error("HTTP 404 Not Found"));
-        assert!(is_http_client_error("HTTP 403 Forbidden"));
         assert!(is_http_client_error("HTTP 410 Gone"));
         assert!(is_http_client_error("HTTP 451 Unavailable For Legal Reasons"));
+        // 403 多为 Cloudflare 挑战/反爬，需走 WebView 处理，故不当作硬错误跳过
+        assert!(!is_http_client_error("HTTP 403 Forbidden"));
     }
 
     #[test]

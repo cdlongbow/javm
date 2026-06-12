@@ -21,7 +21,9 @@ impl Source for ThreeXPlanet {
     }
 
     fn build_url(&self, code: &str) -> String {
-        format!("https://3xplanet.com/{}", code.to_lowercase())
+        // 结尾必须带斜杠：无斜杠会被 301 重定向到带斜杠版本，而本项目客户端
+        // 不跟随重定向，需直接用规范 URL，否则抓取失败。
+        format!("https://3xplanet.com/{}/", code.to_lowercase())
     }
 
     fn parse(&self, html: &str, code: &str) -> Option<SearchResult> {

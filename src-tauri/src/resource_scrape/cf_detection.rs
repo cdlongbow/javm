@@ -106,6 +106,13 @@ pub fn build_cloudflare_detection_function() -> String {
     format!(
         r#"
             function __javmDetectCloudflareChallenge() {{
+                // 0. 年龄验证门（如 javbus 的 /doc/driver-verify）：和 CF 一样需人工
+                //    点击确认，沿用同一弹窗流程让用户手动通过。可在此扩展更多站点。
+                try {{
+                    var __path = (location && location.pathname) ? location.pathname.toLowerCase() : '';
+                    if (__path.indexOf('/doc/driver-verify') !== -1) return true;
+                }} catch (e) {{}}
+
                 // 1. DOM 检测：仅将明确的挑战页结构视为硬命中。
                 var hardDomMatched = document.querySelector('.challenge-form') !== null
                     || document.querySelector('.cf-browser-verification') !== null;

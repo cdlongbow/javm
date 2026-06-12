@@ -1,14 +1,14 @@
 //! javtiful.com 数据源解析器
 //!
 //! 两步刮削：
-//! 1. `build_url` 构造搜索页 `https://javtiful.com/search/videos?search_query={code}`
+//! 1. `build_url` 构造搜索页 `https://javtiful.com/search?q={code}`
 //! 2. `extract_detail_url` 从搜索结果中提取详情页链接（`/video/{id}/{code}`）
 //! 3. `parse` 从详情页提取数据
 //!
 //! 详情页字段来源：
 //! - 标题/封面: `<head>` 中的 og:title / og:image
 //! - 演员: `a[href*="/actress/"]`
-//! - 标签: `a[href*="/search/videos?search_query="]`（Tags 区域）
+//! - 标签: `a[href*="/search?q="]`（Tags 区域）
 //! - 厂商/频道: `a[href*="/channel/"]`
 //! - 分类: `a[href*="/videos/"]`（Category 区域）
 
@@ -26,7 +26,7 @@ impl Source for Javtiful {
 
     fn build_url(&self, code: &str) -> String {
         format!(
-            "https://javtiful.com/search/videos?search_query={}",
+            "https://javtiful.com/search?q={}",
             code.to_lowercase()
         )
     }
@@ -97,8 +97,8 @@ impl Source for Javtiful {
             dedup_strings(actors_from_body).join(", ")
         };
 
-        // 标签：a[href*="/search/videos?search_query="]
-        let tags = collect_link_texts_by_href(&doc, "/search/videos?search_query=");
+        // 标签：a[href*="/search?q="]
+        let tags = collect_link_texts_by_href(&doc, "/search?q=");
         let tags_str = dedup_strings(tags).join(", ");
 
         // 频道/厂商：a[href*="/channel/"]
@@ -327,7 +327,7 @@ mod tests {
     fn build_url_returns_search_page() {
         assert_eq!(
             Javtiful.build_url("DLDSS-479"),
-            "https://javtiful.com/search/videos?search_query=dldss-479"
+            "https://javtiful.com/search?q=dldss-479"
         );
     }
 
@@ -386,8 +386,8 @@ mod tests {
             </div>
             <div class="info">
                 <span>Tags</span>
-                <a href="/search/videos?search_query=creampie">Creampie</a>
-                <a href="/search/videos?search_query=solowork">Solowork</a>
+                <a href="/search?q=creampie">Creampie</a>
+                <a href="/search?q=solowork">Solowork</a>
             </div>
             <div class="info">
                 <span>Category</span>

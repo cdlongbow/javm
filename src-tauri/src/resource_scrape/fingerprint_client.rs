@@ -12,6 +12,10 @@ const TIMEOUT_SECS: u64 = 30;
 
 /// 创建 wreq HTTP 客户端（Chrome TLS 指纹 + 代理）
 pub fn create_client() -> Result<Client, String> {
+    // 注意：刻意不跟随重定向（wreq 默认即如此）。本项目把 3xx（如 javbus 的
+    // 年龄验证门 302）视为"该回退 WebView"的信号；若跟随重定向，会把年龄门/
+    // 反爬页静默解析成垃圾，反而绕过了 WebView 回退。良性 trailing-slash 跳转
+    // 改在各源 build_url 里直接用规范 URL 规避（见 3xplanet）。
     let mut builder = Client::builder()
         .emulation(Emulation::Chrome137)
         .timeout(Duration::from_secs(TIMEOUT_SECS));
