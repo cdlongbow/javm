@@ -678,10 +678,6 @@ watch(() => settingsStore.settings, async (newSettings) => {
         <!-- 下载设置 -->
         <TabsContent value="download">
           <Card>
-            <CardHeader>
-              <CardTitle>下载设置</CardTitle>
-              <CardDescription>配置下载器和保存路径</CardDescription>
-            </CardHeader>
             <CardContent class="space-y-6">
               <!-- 保存路径 -->
               <div class="space-y-2">
