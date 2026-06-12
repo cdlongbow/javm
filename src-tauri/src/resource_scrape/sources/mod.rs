@@ -7,15 +7,18 @@ pub mod av123;
 pub mod common;
 pub mod freejavbt;
 pub mod javbus;
+pub mod javgg;
 pub mod javguru;
 pub mod javlibrary;
 pub mod javmenu;
+pub mod javmost;
 pub mod javplace;
 pub mod javsb;
 pub mod javtiful;
 pub mod javxx;
 pub mod myjav;
 pub mod projectjav;
+pub mod sextb;
 pub mod threexplanet;
 
 #[cfg(test)]
@@ -74,6 +77,9 @@ pub fn all_sources() -> Vec<Box<dyn Source>> {
         Box::new(javtiful::Javtiful),
         Box::new(av123::Av123),
         Box::new(myjav::MyJav),
+        Box::new(javgg::JavGG),
+        Box::new(javmost::JavMost),
+        Box::new(sextb::SexTB),
     ]
 }
 
@@ -167,6 +173,27 @@ pub fn default_sites() -> Vec<ResourceSite> {
         ResourceSite {
             id: "myjav".to_string(),
             name: "数据源 13".to_string(),
+            enabled: true,
+            avg_score: None,
+            scrape_count: None,
+        },
+        ResourceSite {
+            id: "javgg".to_string(),
+            name: "数据源 14".to_string(),
+            enabled: true,
+            avg_score: None,
+            scrape_count: None,
+        },
+        ResourceSite {
+            id: "javmost".to_string(),
+            name: "数据源 15".to_string(),
+            enabled: true,
+            avg_score: None,
+            scrape_count: None,
+        },
+        ResourceSite {
+            id: "sextb".to_string(),
+            name: "数据源 16".to_string(),
             enabled: true,
             avg_score: None,
             scrape_count: None,
