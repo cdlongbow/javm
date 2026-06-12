@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
+import { useDebounceFn } from '@vueuse/core'
 import { Search, ArrowUpDown, Filter, X, LayoutGrid, List, RefreshCw } from 'lucide-vue-next'
 import { useVideoStore, useSettingsStore } from '@/stores'
 import { Input } from '@/components/ui/input'
@@ -123,7 +124,6 @@ watch([activeSortBy, activeSortOrder], ([newBy, newOrder]) => {
 
 // 应用筛选
 const applyFilters = () => {
-  console.log('applyFilters 被调用, filterState:', JSON.stringify(filterState.value))
   videoStore.setFilter({
     directoryPath: filterState.value.directoryPath,
     minRating: filterState.value.minRating ? parseFloat(filterState.value.minRating) : undefined,
@@ -131,7 +131,6 @@ const applyFilters = () => {
     resolution: filterState.value.resolution.length > 0 ? filterState.value.resolution : undefined,
     scraped: filterState.value.scraped.length > 0 ? filterState.value.scraped : undefined,
   })
-  console.log('setFilter 后的 store.filter:', JSON.stringify(videoStore.filter))
 }
 
 // 监听筛选变化自动应用 (或者也可以加 '应用' 按钮，这里选择自动)
@@ -139,13 +138,17 @@ watch(filterState, () => {
   applyFilters()
 }, { deep: true })
 
-// 搜索
+// 搜索：防抖，避免每次按键都触发整库 filter + sort 全量重算
+const applySearch = useDebounceFn(() => {
+  videoStore.setFilter({ search: searchQuery.value })
+}, 250)
+
 const handleSearch = () => {
   // 如果正在输入法组合中，不触发搜索
   if (isComposing.value) {
     return
   }
-  videoStore.setFilter({ search: searchQuery.value })
+  applySearch()
 }
 
 // 输入法组合开始
