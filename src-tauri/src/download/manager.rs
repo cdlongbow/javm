@@ -281,6 +281,35 @@ async fn trigger_post_download_processing(app: tauri::AppHandle, task: &Download
         file_path_str
     );
 
+    // 仅当下载文件位于「目录管理」内的目录时，才写入媒体库（刮削/封面/视频记录）。
+    // 否则用户只是下载到库外位置，不应让其出现在媒体库中。
+    let in_managed_dir = (|| -> Result<bool, String> {
+        let db = crate::db::Database::new(&app).map_err(|e| e.to_string())?;
+        let conn = db.get_connection().map_err(|e| e.to_string())?;
+        crate::db::Database::is_video_under_managed_directory(&conn, &file_path_str)
+            .map_err(|e| e.to_string())
+    })();
+    match in_managed_dir {
+        Ok(true) => {}
+        Ok(false) => {
+            log::info!(
+                "[post_download] event=skip_library_unmanaged_dir task_id={} path={}",
+                task.id,
+                file_path_str
+            );
+            return;
+        }
+        Err(e) => {
+            log::warn!(
+                "[post_download] event=managed_dir_check_failed task_id={} path={} action=skip error={}",
+                task.id,
+                file_path_str,
+                e
+            );
+            return;
+        }
+    }
+
     let designation = match extract_designation_from_path(&file_path_str) {
         Ok(value) => Some(value),
         Err(e) => {

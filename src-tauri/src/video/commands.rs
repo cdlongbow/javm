@@ -194,6 +194,18 @@ pub async fn get_videos(db: State<'_, crate::db::Database>) -> AppResult<Vec<ser
             videos.push(video?);
         }
 
+        // 仅保留位于「目录管理」内的视频，避免下载到库外的文件污染媒体库
+        let managed_prefixes = crate::db::Database::managed_directory_prefixes(&conn)?;
+        videos.retain(|video| {
+            video
+                .get("videoPath")
+                .and_then(|p| p.as_str())
+                .map(|path| {
+                    crate::db::Database::is_path_under_managed_directory(&managed_prefixes, path)
+                })
+                .unwrap_or(false)
+        });
+
         Ok(videos)
     })
     .await

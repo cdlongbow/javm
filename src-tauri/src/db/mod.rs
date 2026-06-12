@@ -1077,6 +1077,46 @@ impl Database {
         (normalized, pattern)
     }
 
+    /// 加载所有「目录管理」目录的规范化前缀（统一为 `/` 分隔、去除结尾 `/`）。
+    pub fn managed_directory_prefixes(conn: &Connection) -> Result<Vec<String>> {
+        let mut stmt = conn.prepare("SELECT path FROM directories")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .filter_map(|r| r.ok())
+            .map(|p| p.replace('\\', "/").trim_end_matches('/').to_string())
+            .filter(|p| !p.is_empty())
+            .collect())
+    }
+
+    /// 判断视频文件路径是否位于任一「目录管理」目录（或其子目录）下。
+    /// Windows 下路径大小写不敏感。
+    pub fn is_path_under_managed_directory(prefixes: &[String], video_path: &str) -> bool {
+        let normalized = video_path.replace('\\', "/");
+        prefixes
+            .iter()
+            .any(|prefix| Self::path_is_inside(&normalized, prefix))
+    }
+
+    /// 判断 `path` 是否在目录 `dir` 之内（dir 为不带结尾 `/` 的规范化路径）。
+    fn path_is_inside(path: &str, dir: &str) -> bool {
+        let needle = format!("{}/", dir);
+        #[cfg(windows)]
+        {
+            path.to_ascii_lowercase()
+                .starts_with(&needle.to_ascii_lowercase())
+        }
+        #[cfg(not(windows))]
+        {
+            path.starts_with(&needle)
+        }
+    }
+
+    /// 判断单个视频文件是否位于「目录管理」内（便捷封装）。
+    pub fn is_video_under_managed_directory(conn: &Connection, video_path: &str) -> Result<bool> {
+        let prefixes = Self::managed_directory_prefixes(conn)?;
+        Ok(Self::is_path_under_managed_directory(&prefixes, video_path))
+    }
+
     pub fn update_directory_video_count(conn: &Connection, path: &str, count: i64) -> Result<()> {
         conn.execute(
             "UPDATE directories SET video_count = ?, updated_at = CURRENT_TIMESTAMP WHERE path = ?",
