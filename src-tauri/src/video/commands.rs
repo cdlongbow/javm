@@ -12,25 +12,6 @@ use super::service::{
     parse_name_list,
 };
 
-fn resolve_cover_path(poster: Option<String>, thumb: Option<String>) -> Option<String> {
-    let has_existing_file = |path: &str| {
-        let trimmed = path.trim();
-        !trimmed.is_empty() && Path::new(trimmed).exists()
-    };
-
-    if let Some(path) = poster.as_deref().filter(|path| has_existing_file(path)) {
-        return Some(path.to_string());
-    }
-
-    if let Some(path) = thumb.as_deref().filter(|path| has_existing_file(path)) {
-        return Some(path.to_string());
-    }
-
-    poster
-        .filter(|path| !path.trim().is_empty())
-        .or_else(|| thumb.filter(|path| !path.trim().is_empty()))
-}
-
 // ==================== 目录管理 ====================
 
 #[tauri::command]
@@ -168,8 +149,9 @@ pub async fn get_videos(db: State<'_, crate::db::Database>) -> AppResult<Vec<ser
                 ) as genres,
                 v.fast_hash
             FROM videos v
-            ORDER BY v.created_at DESC
         "#;
+        // 注意：不在 SQL 里排序，最终顺序由 enrich_videos_with_file_times 按文件
+        // 创建时间重排覆盖，此处排序属浪费。
 
         let mut stmt = conn.prepare(sql)?;
 
@@ -193,7 +175,8 @@ pub async fn get_videos(db: State<'_, crate::db::Database>) -> AppResult<Vec<ser
                     "scanStatus": row.get::<_, i32>(8)?,
                     "director": row.get::<_, Option<String>>(9)?,
                     "localId": row.get::<_, Option<String>>(10)?,
-                    "poster": resolve_cover_path(poster.clone(), thumb.clone()),
+                    // 原始 poster，封面存在性解析挪到 enrich 并发阶段，避免在此串行 exists()
+                    "poster": poster,
                     "thumb": thumb,
                     "fanart": row.get::<_, Option<String>>(13)?,
                     "originalTitle": row.get::<_, Option<String>>(14)?,

@@ -65,6 +65,31 @@ fn parse_rfc3339_timestamp(value: &serde_json::Value, key: &str) -> Option<i64> 
         .map(|field| field.timestamp_millis())
 }
 
+/// 解析最终封面路径：优先返回实际存在的 poster/thumb 文件，否则回退非空候选。
+/// 原先在 get_videos 的 SQL 查询循环里逐行串行 exists()，现并入 enrich 的并发 FS 阶段。
+fn resolve_cover_path(poster: Option<String>, thumb: Option<String>) -> Option<String> {
+    let has_existing_file = |path: &str| {
+        let trimmed = path.trim();
+        !trimmed.is_empty() && std::path::Path::new(trimmed).exists()
+    };
+
+    if let Some(path) = poster.as_deref().filter(|path| has_existing_file(path)) {
+        return Some(path.to_string());
+    }
+
+    if let Some(path) = thumb.as_deref().filter(|path| has_existing_file(path)) {
+        return Some(path.to_string());
+    }
+
+    poster
+        .filter(|path| !path.trim().is_empty())
+        .or_else(|| thumb.filter(|path| !path.trim().is_empty()))
+}
+
+/// 为视频列表补齐文件创建/修改时间并解析封面，按文件创建时间倒序排列。
+///
+/// 每个视频的文件 `metadata` 与封面 `exists()` 校验合并到同一个并发任务里，
+/// 避免在 SQL 查询循环里逐行串行 stat（大库时是主列表加载的主要开销）。
 pub(crate) async fn enrich_videos_with_file_times(mut videos: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
     let max_concurrency = std::thread::available_parallelism()
         .map(|parallelism| parallelism.get())
@@ -81,31 +106,41 @@ pub(crate) async fn enrich_videos_with_file_times(mut videos: Vec<serde_json::Va
         else {
             continue;
         };
+        // 原始封面候选，移到并发阶段解析存在性
+        let poster = video.get("poster").and_then(|v| v.as_str()).map(str::to_owned);
+        let thumb = video.get("thumb").and_then(|v| v.as_str()).map(str::to_owned);
 
         let semaphore = Arc::clone(&semaphore);
         tasks.spawn(async move {
             let _permit = semaphore.acquire_owned().await.ok();
-            let metadata = tokio::task::spawn_blocking(move || std::fs::metadata(&video_path)).await;
+            let result = tokio::task::spawn_blocking(move || {
+                // 同一并发任务内完成：视频文件时间 + 封面存在性解析
+                let metadata = std::fs::metadata(&video_path);
+                let cover = resolve_cover_path(poster, thumb);
+                (metadata, cover)
+            })
+            .await;
 
-            let (file_created_at, file_modified_at) = match metadata {
-                Ok(Ok(metadata)) => {
+            let (file_created_at, file_modified_at, cover) = match result {
+                Ok((Ok(metadata), cover)) => {
                     let file_modified_at = metadata.modified().ok().map(system_time_to_rfc3339);
                     let file_created_at = metadata
                         .created()
                         .ok()
                         .or_else(|| metadata.modified().ok())
                         .map(system_time_to_rfc3339);
-                    (file_created_at, file_modified_at)
+                    (file_created_at, file_modified_at, cover)
                 }
-                _ => (None, None),
+                Ok((Err(_), cover)) => (None, None, cover),
+                Err(_) => (None, None, None),
             };
 
-            (index, file_created_at, file_modified_at)
+            (index, file_created_at, file_modified_at, cover)
         });
     }
 
     while let Some(result) = tasks.join_next().await {
-        let Ok((index, file_created_at, file_modified_at)) = result else {
+        let Ok((index, file_created_at, file_modified_at, cover)) = result else {
             continue;
         };
 
@@ -115,9 +150,11 @@ pub(crate) async fn enrich_videos_with_file_times(mut videos: Vec<serde_json::Va
 
         let file_created_at = serde_json::to_value(file_created_at).unwrap_or(serde_json::Value::Null);
         let file_modified_at = serde_json::to_value(file_modified_at).unwrap_or(serde_json::Value::Null);
+        let cover = serde_json::to_value(cover).unwrap_or(serde_json::Value::Null);
 
         video.insert("fileCreatedAt".to_string(), file_created_at);
         video.insert("fileModifiedAt".to_string(), file_modified_at);
+        video.insert("poster".to_string(), cover);
     }
 
     videos.sort_by(|left, right| match (
