@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, onActivated, computed, watch } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
 import { Search, ArrowUpDown, Filter, X, LayoutGrid, List, RefreshCw } from 'lucide-vue-next'
 import { useVideoStore, useSettingsStore } from '@/stores'
@@ -43,6 +43,7 @@ const settingsStore = useSettingsStore()
 const searchQuery = ref('')
 const detailDialogOpen = ref(false)
 const scrapeDialogRef = ref<InstanceType<typeof ScrapeDialog> | null>(null)
+const virtualGridRef = ref<InstanceType<typeof VirtualGrid> | null>(null)
 const selectedVideo = ref<Video | null>(null)
 
 // 视图模式 - 从设置中读取
@@ -55,6 +56,7 @@ const toggleViewMode = () => {
 
 const refreshMediaLibrary = async () => {
   await videoStore.fetchVideos()
+  virtualGridRef.value?.refreshLayout()
 }
 
 // 输入法组合状态
@@ -172,6 +174,10 @@ const clearSearch = () => {
 onMounted(() => {
   videoStore.fetchVideos()
   videoStore.fetchDirectories()
+})
+
+onActivated(() => {
+  virtualGridRef.value?.refreshLayout()
 })
 
 // 为了演示，计算属性直接从 Store 取
@@ -512,6 +518,7 @@ const unscrapedChecked = computed({
         </Button>
       </div>
       <VirtualGrid
+        ref="virtualGridRef"
         v-else
         :items="displayVideos"
         :loading="videoStore.loading && videoStore.totalCount === 0"

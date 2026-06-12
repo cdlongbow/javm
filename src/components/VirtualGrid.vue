@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onActivated } from 'vue'
+import { ref, computed, watch, nextTick, onActivated, onDeactivated } from 'vue'
 import { useRouter } from 'vue-router'
-import { useVirtualizer } from '@tanstack/vue-virtual'
 import { useElementSize } from '@vueuse/core'
 import VideoCard from './VideoCard.vue'
 import VideoListItem from './VideoListItem.vue'
@@ -32,8 +31,8 @@ const router = useRouter()
 // 容器引用
 const containerRef = ref<HTMLElement>()
 
-// 使用 useElementSize 监听容器宽度变化
-const { width: containerWidth } = useElementSize(containerRef)
+// 监听容器尺寸变化，页面从隐藏恢复时常见的是高度先为 0 再恢复
+const { width: containerWidth, height: containerHeight } = useElementSize(containerRef)
 
 // 响应式列数配置
 const columnConfig = {
@@ -44,6 +43,7 @@ const columnConfig = {
 }
 
 const coverAspectRatio = 536 / 800
+const OVERSCAN_ROWS = 3
 
 // 是否为列表模式
 const isListMode = computed(() => props.viewMode === 'list')
@@ -64,19 +64,14 @@ const columns = computed(() => {
 const rowCount = computed(() => Math.ceil(props.items.length / columns.value))
 
 // 卡片高度（列表模式使用固定行高）
-const cardHeight = computed(() => {
+const rowHeight = computed(() => {
   if (isListMode.value) return 126 // 列表行高
   const coverHeight = columnConfig.cardWidth * coverAspectRatio
   return coverHeight + 60 + columnConfig.gap // 封面高度 + 信息区域 + 行间距
 })
 
-// 虚拟化器
-const virtualizer = useVirtualizer({
-  get count() { return rowCount.value },
-  getScrollElement: () => containerRef.value ?? null,
-  estimateSize: () => cardHeight.value,
-  overscan: 3,
-})
+const scrollTop = ref(0)
+const savedScrollTop = ref(0)
 
 // 获取某一行的视频
 const getRowItems = (rowIndex: number): Video[] => {
@@ -84,11 +79,47 @@ const getRowItems = (rowIndex: number): Video[] => {
   return props.items.slice(startIndex, startIndex + columns.value)
 }
 
-// 虚拟行
-const virtualRows = computed(() => virtualizer.value.getVirtualItems())
+interface VirtualRow {
+  index: number
+  key: string
+  start: number
+  size: number
+}
 
-// 总高度
-const totalHeight = computed(() => virtualizer.value.getTotalSize())
+const visibleRange = computed(() => {
+  const itemCount = rowCount.value
+  const currentRowHeight = rowHeight.value
+  const viewportHeight = Math.max(containerHeight.value, currentRowHeight)
+
+  if (itemCount === 0 || currentRowHeight <= 0) {
+    return { start: 0, end: 0 }
+  }
+
+  const firstVisibleRow = Math.floor(scrollTop.value / currentRowHeight)
+  const visibleRowCount = Math.ceil(viewportHeight / currentRowHeight)
+  const start = Math.max(0, firstVisibleRow - OVERSCAN_ROWS)
+  const end = Math.min(itemCount, firstVisibleRow + visibleRowCount + OVERSCAN_ROWS)
+
+  return { start, end }
+})
+
+const virtualRows = computed<VirtualRow[]>(() => {
+  const rows: VirtualRow[] = []
+  const currentRowHeight = rowHeight.value
+
+  for (let index = visibleRange.value.start; index < visibleRange.value.end; index += 1) {
+    rows.push({
+      index,
+      key: String(index),
+      start: index * currentRowHeight,
+      size: currentRowHeight,
+    })
+  }
+
+  return rows
+})
+
+const totalHeight = computed(() => rowCount.value * rowHeight.value)
 
 // 处理视频点击
 const handleVideoClick = (video: Video) => {
@@ -114,24 +145,51 @@ const handleVideoPlay = async (video: Video) => {
   }
 }
 
-const remeasureVirtualizer = async () => {
+const applySavedScrollPosition = async () => {
   await nextTick()
-  virtualizer.value.measure()
+  const container = containerRef.value
+  if (!container) {
+    return
+  }
+
+  if (container.scrollTop !== savedScrollTop.value) {
+    container.scrollTop = savedScrollTop.value
+  }
+
+  scrollTop.value = container.scrollTop
 }
 
-// 监听数据和布局变化，重新计算虚拟化
-watch([() => props.items, columns, () => props.viewMode], () => {
-  void remeasureVirtualizer()
+const syncLayout = async () => {
+  await nextTick()
+  scrollTop.value = containerRef.value?.scrollTop ?? savedScrollTop.value
+}
+
+const handleScroll = () => {
+  const currentScrollTop = containerRef.value?.scrollTop ?? 0
+  scrollTop.value = currentScrollTop
+  savedScrollTop.value = currentScrollTop
+}
+
+watch([() => props.items.length, columns, () => props.viewMode, containerWidth, containerHeight], () => {
+  void syncLayout()
 })
 
-// KeepAlive 重新激活后强制重测，避免隐藏期间的尺寸缓存导致列表空白
+// KeepAlive 重新激活后同步滚动和容器尺寸，避免隐藏期间恢复为空白
 onActivated(() => {
-  void remeasureVirtualizer()
+  void applySavedScrollPosition()
+})
+
+onDeactivated(() => {
+  savedScrollTop.value = containerRef.value?.scrollTop ?? savedScrollTop.value
+})
+
+defineExpose({
+  refreshLayout: syncLayout,
 })
 </script>
 
 <template>
-  <div ref="containerRef" class="h-full overflow-auto px-1">
+  <div ref="containerRef" class="h-full overflow-auto px-1" @scroll="handleScroll">
     <!-- 加载状态 -->
     <div v-if="loading" class="flex items-center justify-center h-full">
       <div class="text-center text-muted-foreground">

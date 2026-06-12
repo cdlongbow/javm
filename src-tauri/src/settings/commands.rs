@@ -6,7 +6,7 @@ use tauri::AppHandle;
 use tauri::Manager;
 
 use super::encryption::{obfuscate_settings, deobfuscate_settings};
-use super::{AppSettings, normalize_scrape_settings, get_settings_path};
+use super::{AppSettings, get_settings_path, normalize_ad_filter_settings, normalize_scrape_settings};
 
 #[tauri::command]
 pub async fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
@@ -32,6 +32,7 @@ pub async fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
 
     // 解密API Key
     deobfuscate_settings(&mut settings);
+    normalize_ad_filter_settings(&mut settings.ad_filter);
     normalize_scrape_settings(&mut settings.scrape);
 
     Ok(settings)
@@ -48,6 +49,7 @@ pub async fn save_settings(app: AppHandle, mut settings: AppSettings) -> Result<
 
     // 加密API Key后再保存
     obfuscate_settings(&mut settings);
+    normalize_ad_filter_settings(&mut settings.ad_filter);
     normalize_scrape_settings(&mut settings.scrape);
 
     let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;

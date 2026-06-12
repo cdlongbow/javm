@@ -270,6 +270,39 @@ pub struct AdFilterSettings {
     pub exclude_keywords: Vec<String>,
 }
 
+const DEFAULT_AD_FILTER_KEYWORDS: &[&str] = &["全網網黃國"];
+
+fn normalize_keyword_list(keywords: &mut Vec<String>) {
+    let mut normalized = Vec::new();
+
+    for keyword in keywords.drain(..) {
+        let trimmed = keyword.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let exists = normalized
+            .iter()
+            .any(|item: &String| item.eq_ignore_ascii_case(trimmed) || item == trimmed);
+        if !exists {
+            normalized.push(trimmed.to_string());
+        }
+    }
+
+    *keywords = normalized;
+}
+
+pub fn normalize_ad_filter_settings(ad_filter: &mut AdFilterSettings) {
+    normalize_keyword_list(&mut ad_filter.keywords);
+    normalize_keyword_list(&mut ad_filter.exclude_keywords);
+
+    for keyword in DEFAULT_AD_FILTER_KEYWORDS {
+        if !ad_filter.keywords.iter().any(|item| item == keyword) {
+            ad_filter.keywords.push((*keyword).to_string());
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AIProvider {
     pub id: String,
@@ -386,7 +419,10 @@ impl Default for AISettings {
 impl Default for AdFilterSettings {
     fn default() -> Self {
         Self {
-            keywords: Vec::new(),
+            keywords: DEFAULT_AD_FILTER_KEYWORDS
+                .iter()
+                .map(|keyword| (*keyword).to_string())
+                .collect(),
             exclude_keywords: Vec::new(),
         }
     }

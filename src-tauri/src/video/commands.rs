@@ -194,6 +194,38 @@ pub async fn get_videos(db: State<'_, crate::db::Database>) -> AppResult<Vec<ser
             videos.push(video?);
         }
 
+        let stale_paths: Vec<String> = videos
+            .iter()
+            .filter_map(|video| {
+                let path = video.get("videoPath").and_then(|p| p.as_str())?;
+                if std::path::Path::new(path).exists() {
+                    None
+                } else {
+                    Some(path.to_string())
+                }
+            })
+            .collect();
+
+        if !stale_paths.is_empty() {
+            for chunk in stale_paths.chunks(500) {
+                let placeholders = std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(", ");
+                let sql = format!("DELETE FROM videos WHERE video_path IN ({})", placeholders);
+                let params = chunk
+                    .iter()
+                    .map(|path| path as &dyn rusqlite::types::ToSql)
+                    .collect::<Vec<_>>();
+                conn.execute(&sql, params.as_slice())?;
+            }
+
+            videos.retain(|video| {
+                video
+                    .get("videoPath")
+                    .and_then(|p| p.as_str())
+                    .map(|path| !stale_paths.iter().any(|stale_path| stale_path == path))
+                    .unwrap_or(false)
+            });
+        }
+
         // 仅保留位于「目录管理」内的视频，避免下载到库外的文件污染媒体库
         let managed_prefixes = crate::db::Database::managed_directory_prefixes(&conn)?;
         videos.retain(|video| {
@@ -649,7 +681,7 @@ pub async fn find_ad_videos(
 
         // 第一步：查询所有视频（移除 50MB 限制）
         let mut stmt = conn
-            .prepare("SELECT id, video_path, file_size FROM videos")?;
+            .prepare("SELECT id, video_path, file_size, title FROM videos")?;
 
         let all_videos = stmt
             .query_map([], |row| {
@@ -657,13 +689,14 @@ pub async fn find_ad_videos(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })?;
 
         let mut video_list = Vec::new();
         for video in all_videos {
-            let (id, path, size) = video?;
-            video_list.push((id, path, size));
+            let (id, path, size, title) = video?;
+            video_list.push((id, path, size, title));
         }
 
         log::info!(
@@ -673,7 +706,7 @@ pub async fn find_ad_videos(
 
         // 第二步：统计文件名出现次数（在所有视频中统计）
         let mut filename_count: HashMap<String, Vec<String>> = HashMap::new();
-        for (_, path, _) in &video_list {
+        for (_, path, _, _) in &video_list {
             if let Some(filename) = std::path::Path::new(path).file_name() {
                 let filename_str = filename.to_string_lossy().to_string();
                 filename_count
@@ -684,7 +717,7 @@ pub async fn find_ad_videos(
         }
 
         // 第三步：检查每个视频
-        for (id, path, size) in video_list {
+        for (id, path, size, title) in video_list {
             let filename = std::path::Path::new(&path)
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string())
@@ -705,9 +738,12 @@ pub async fn find_ad_videos(
                     }
                 }
 
-                // 规则3: 关键词过滤
+                // 规则3: 关键词过滤（同时检查文件名和视频标题）
+                let filename_lower = filename.to_lowercase();
+                let title_lower = title.as_deref().unwrap_or("").to_lowercase();
                 for keyword in &keywords {
-                    if filename.to_lowercase().contains(&keyword.to_lowercase()) {
+                    let kw = keyword.to_lowercase();
+                    if filename_lower.contains(&kw) || title_lower.contains(&kw) {
                         reasons.push(format!("包含关键词: {}", keyword));
                         break;
                     }
@@ -715,12 +751,16 @@ pub async fn find_ad_videos(
             }
 
             // 如果有任何匹配的原因，添加到结果
-            // 但如果文件名包含排除关键词，则跳过
+            // 但如果文件名或标题包含排除关键词，则跳过
             if !reasons.is_empty() {
                 let filename_lower = filename.to_lowercase();
+                let title_lower = title.as_deref().unwrap_or("").to_lowercase();
                 let excluded = exclude_keywords
                     .iter()
-                    .any(|ek| filename_lower.contains(&ek.to_lowercase()));
+                    .any(|ek| {
+                        let ek_lower = ek.to_lowercase();
+                        filename_lower.contains(&ek_lower) || title_lower.contains(&ek_lower)
+                    });
                 if !excluded {
                     ad_videos.push(AdVideo {
                         id,
