@@ -598,8 +598,8 @@ pub async fn recognize_designation_with_ai(
             RecognitionMethod::Failed => "failed".to_string(),
         },
         message: match result.method {
-            RecognitionMethod::Regex => format!("智能识别成功（正则匹配）"),
-            RecognitionMethod::AI => format!("智能识别成功（AI）"),
+            RecognitionMethod::Regex => "智能识别成功（正则匹配）".to_string(),
+            RecognitionMethod::AI => "智能识别成功（AI）".to_string(),
             RecognitionMethod::Failed => {
                 if force_ai && !recognizer.has_ai_provider() {
                     "没有可用的AI提供商，请在设置中配置".to_string()

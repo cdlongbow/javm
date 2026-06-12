@@ -39,6 +39,17 @@ pub struct DesignationRecognizer {
     ai_provider: Option<AIProvider>,
 }
 
+/// 番号识别正则（按优先级），进程内只编译一次。
+static REGEX_PATTERNS: std::sync::LazyLock<Vec<(Regex, i32)>> = std::sync::LazyLock::new(|| {
+    vec![
+        (Regex::new(r"(?i)(FC2)-?PPV-?(\d{6,8})").unwrap(), 100),
+        (Regex::new(r"(?i)([A-Z]{2,6})-(\d{3,5})").unwrap(), 90),
+        (Regex::new(r"(?i)([A-Z]+\d+)-(\d{3,5})").unwrap(), 85),
+        (Regex::new(r"(?i)([A-Z]{2,6})(\d{3,5})(?:[^A-Z0-9]|$)").unwrap(), 80),
+        (Regex::new(r"(?i)(\d{6})[_-](\d{3,5})").unwrap(), 70),
+    ]
+});
+
 impl DesignationRecognizer {
     /// 创建新的番号识别器实例
     /// 
@@ -49,25 +60,9 @@ impl DesignationRecognizer {
     /// 4. 无连字符格式 ABC123 (优先级 80)
     /// 5. 纯数字格式 123456-789 (最低优先级 70)
     pub fn new() -> Self {
-        let regex_patterns = vec![
-            // FC2-PPV-123456 格式 (最高优先级)
-            (Regex::new(r"(?i)(FC2)-?PPV-?(\d{6,8})").unwrap(), 100),
-            
-            // ABC-123 格式 (纯字母前缀带连字符，高优先级)
-            (Regex::new(r"(?i)([A-Z]{2,6})-(\d{3,5})").unwrap(), 90),
-            
-            // T28-123 格式 (字母+数字混合前缀，中高优先级)
-            (Regex::new(r"(?i)([A-Z]+\d+)-(\d{3,5})").unwrap(), 85),
-            
-            // ABC123 格式 (无连字符，中优先级)
-            (Regex::new(r"(?i)([A-Z]{2,6})(\d{3,5})(?:[^A-Z0-9]|$)").unwrap(), 80),
-            
-            // 123456-789 格式 (纯数字，低优先级)
-            (Regex::new(r"(?i)(\d{6})[_-](\d{3,5})").unwrap(), 70),
-        ];
-
         DesignationRecognizer {
-            regex_patterns,
+            // 复用进程内只编译一次的正则（Regex 内部 Arc，clone 廉价）
+            regex_patterns: REGEX_PATTERNS.clone(),
             ai_provider: None,
         }
     }
