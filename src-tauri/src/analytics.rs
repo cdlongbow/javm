@@ -107,7 +107,20 @@ fn video_total_count(conn: &Connection) -> i64 {
         .unwrap_or(0)
 }
 
+/// 建表/迁移在进程内最多执行一次，避免高频 record_* 路径每次都跑同步阻塞 DB 操作
+static ENSURE_TABLES_ONCE: std::sync::Once = std::sync::Once::new();
+
 fn ensure_tables(conn: &Connection) -> Result<(), String> {
+    // 首次调用执行建表/迁移；后续调用为廉价 no-op。Once 保证并发安全。
+    ENSURE_TABLES_ONCE.call_once(|| {
+        if let Err(e) = ensure_tables_inner(conn) {
+            log::error!("[analytics] event=ensure_tables_failed error={}", e);
+        }
+    });
+    Ok(())
+}
+
+fn ensure_tables_inner(conn: &Connection) -> Result<(), String> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS analytics_meta (
             key TEXT PRIMARY KEY,
