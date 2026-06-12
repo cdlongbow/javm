@@ -94,6 +94,7 @@ export interface ScrapeSettings {
     devShowWebview: boolean    // 开发调试时默认显示隐藏 WebView（开发者选项）
     defaultSite: string        // 默认刮削网站（如 "javbus"）
     sites: ResourceSite[]      // 资源网站列表
+    linkFinderSite: string     // 资源链接查找器上次选择的视频站点 id
 }
 
 /** AI 设置 */
@@ -177,6 +178,7 @@ export const defaultSettings: AppSettings = {
         webviewFallbackEnabled: false,
         devShowWebview: false,
         defaultSite: 'javbus',
+        linkFinderSite: 'missav',
         sites: [
             { id: 'javbus', name: '数据源 1', enabled: true },
             { id: 'javmenu', name: '数据源 2', enabled: true },

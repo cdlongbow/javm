@@ -146,6 +146,9 @@ pub struct ScrapeSettings {
     pub default_site: String,
     #[serde(default = "default_scrape_sites")]
     pub sites: Vec<ResourceSite>,
+    /// 资源链接查找器上次选择的视频站点 id（与 sites 不同，独立的视频源列表）
+    #[serde(rename = "linkFinderSite", default = "default_link_finder_site")]
+    pub link_finder_site: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -162,6 +165,10 @@ fn default_scrape_default_site() -> String {
         .find(|site| site.enabled)
         .map(|site| site.id)
         .unwrap_or_else(|| "javbus".to_string())
+}
+
+fn default_link_finder_site() -> String {
+    "missav".to_string()
 }
 
 fn default_scrape_sites() -> Vec<ResourceSite> {
@@ -360,6 +367,7 @@ impl Default for ScrapeSettings {
             dev_show_webview: false,
             default_site: default_scrape_default_site(),
             sites: default_scrape_sites(),
+            link_finder_site: default_link_finder_site(),
         }
     }
 }

@@ -31,7 +31,6 @@ import {
   Download,
   Link as LinkIcon,
   CheckCircle2,
-  FolderOpen,
   X,
   ChevronDown,
   Globe,
@@ -48,12 +47,13 @@ import {
   checkVideoExists,
   type VideoExistCheckResult
 } from '@/lib/tauri'
-import { getSettings, selectDirectory } from '@/lib/tauri'
-import { useDownloadStore } from '@/stores'
+import { getDefaultDownloadPath } from '@/lib/tauri'
+import { useDownloadStore, useSettingsStore } from '@/stores'
 import { toast } from 'vue-sonner'
 
 // 状态
 const downloadStore = useDownloadStore()
+const settingsStore = useSettingsStore()
 const code = ref('')
 const scanning = ref(false)
 const links = ref<VideoLink[]>([])
@@ -120,11 +120,8 @@ async function startFinding() {
   // 加载网站列表
   try { sites.value = await getVideoSites() } catch { /* 忽略 */ }
 
-  // 获取默认下载路径
-  try {
-    const settings = await getSettings()
-    if (settings.download?.savePath) savePath.value = settings.download.savePath
-  } catch { /* 忽略 */ }
+  // 下载路径直接使用下载设置中的默认保存路径
+  await resolveSavePath()
 
   // 监听事件
   try {
@@ -158,6 +155,28 @@ async function startFinding() {
     toast.error(`打开查找窗口失败: ${e}`)
     scanning.value = false
     cfChallengeActive.value = false
+  }
+}
+
+// 选择资源站点（统一入口）：持久化选择，并按是否正在扫描决定是否立即切换
+function pickSite(siteId: string) {
+  persistSelectedSite(siteId)
+  if (scanning.value) {
+    switchSite(siteId)
+  } else {
+    selectedSiteId.value = siteId
+  }
+}
+
+// 持久化资源站点选择，使软件重启后保留上次选择
+async function persistSelectedSite(siteId: string) {
+  if (settingsStore.settings.scrape.linkFinderSite === siteId) return
+  try {
+    await settingsStore.updateSettings({
+      scrape: { ...settingsStore.settings.scrape, linkFinderSite: siteId },
+    })
+  } catch (e) {
+    console.error('保存资源站点选择失败:', e)
   }
 }
 
@@ -203,11 +222,16 @@ function selectNone() {
   selectedUrls.value = new Set()
 }
 
-async function handleSelectPath() {
+// 下载路径直接取自下载设置；未配置时回退到系统默认下载目录
+async function resolveSavePath() {
+  const configured = settingsStore.settings.download.savePath
+  if (configured) {
+    savePath.value = configured
+    return
+  }
   try {
-    const selected = await selectDirectory()
-    if (selected) savePath.value = selected
-  } catch { toast.error('选择目录失败') }
+    savePath.value = await getDefaultDownloadPath()
+  } catch { /* 忽略 */ }
 }
 
 async function handleAddTasks(ignoreDuplicate: boolean = false) {
@@ -268,7 +292,7 @@ async function handlePreview(link: VideoLink) {
 // 下载单个视频
 async function handleDownloadSingle(link: VideoLink, ignoreDuplicate: boolean = false) {
   if (!savePath.value) {
-    toast.error('请先选择保存目录')
+    toast.error('未设置默认下载路径，请在系统设置 - 下载设置中配置')
     return
   }
   const filename = code.value.trim().toUpperCase()
@@ -336,6 +360,11 @@ defineExpose({
 
 onMounted(async () => {
   try { sites.value = await getVideoSites() } catch { /* 忽略 */ }
+  // 恢复上次选择的资源站点（设置已在应用启动时加载）
+  const saved = settingsStore.settings.scrape.linkFinderSite
+  if (saved) selectedSiteId.value = saved
+  // 预先解析下载路径，直接使用下载设置中的默认保存路径
+  await resolveSavePath()
 })
 
 onUnmounted(() => {
@@ -373,7 +402,7 @@ onUnmounted(() => {
         <DropdownMenuContent align="start" class="w-48">
           <DropdownMenuItem v-for="(site, index) in sites" :key="site.id"
             :class="selectedSiteId === site.id ? 'bg-accent' : ''"
-            @click="scanning ? switchSite(site.id) : (selectedSiteId = site.id)">
+            @click="pickSite(site.id)">
             资源 {{ index + 1 }}
           </DropdownMenuItem>
         </DropdownMenuContent>
@@ -480,13 +509,11 @@ onUnmounted(() => {
           </div>
         </ScrollArea>
 
-        <!-- 保存路径和下载 -->
+        <!-- 保存路径（使用下载设置中的默认路径）和下载 -->
         <div class="flex items-center gap-2 mt-auto pt-2 border-t">
-          <input v-model="savePath" readonly placeholder="选择保存目录"
-            class="flex-1 h-9 rounded-md border border-input bg-transparent px-3 text-sm" />
-          <Button variant="outline" size="sm" class="h-9" @click="handleSelectPath">
-            <FolderOpen class="size-4" />
-          </Button>
+          <div class="flex-1 min-w-0 truncate text-xs text-muted-foreground">
+            保存到：{{ savePath || '未设置默认下载路径，请在系统设置 - 下载设置中配置' }}
+          </div>
           <Button :disabled="selectedUrls.size === 0 || !savePath || adding" size="sm" class="h-9"
             @click="() => handleAddTasks(false)">
             <Loader2 v-if="adding" class="mr-2 size-4 animate-spin" />
