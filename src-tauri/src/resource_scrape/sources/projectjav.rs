@@ -12,6 +12,19 @@
 use super::common::{dedup_strings, extract_head_meta, select_all_attr, select_text};
 use super::{SearchResult, Source};
 use scraper::{Html, Selector};
+use std::sync::LazyLock;
+
+// 常量选择器缓存：字面量选择器只编译一次，避免每次调用重复 parse
+static A_HREF_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href]").unwrap());
+static IMG_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("img").unwrap());
+static IMG_MW100_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("img.mw-100").unwrap());
+static ACTRESS_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".actress-item a").unwrap());
+static BADGE_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".badge-info a").unwrap());
+static ROW_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".row").unwrap());
+static COL3_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".col-3").unwrap());
+static COL9_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".col-9").unwrap());
 
 pub struct ProjectJav;
 
@@ -30,8 +43,7 @@ impl Source for ProjectJav {
         let code_lower = code.to_lowercase();
         // 匹配 href="/movie/{code}-{id}" 格式的链接
         let prefix = format!("/movie/{}-", code_lower);
-        let sel = Selector::parse("a[href]").ok()?;
-        for el in doc.select(&sel) {
+        for el in doc.select(&A_HREF_SEL) {
             let href = el.value().attr("href").unwrap_or("");
             if href.starts_with(&prefix) {
                 return Some(format!("https://projectjav.com{}", href));
@@ -126,16 +138,14 @@ impl Source for ProjectJav {
 /// 从详情页查找封面图：img[src*="covers"] 或 img.mw-100
 fn select_cover_img(doc: &Html) -> Option<String> {
     // 优先找 src 包含 "covers" 的 img
-    let sel = Selector::parse("img").ok()?;
-    for el in doc.select(&sel) {
+    for el in doc.select(&IMG_SEL) {
         let src = el.value().attr("src").unwrap_or("");
         if src.contains("/covers/") {
             return Some(src.to_string());
         }
     }
     // fallback: img.mw-100
-    let sel2 = Selector::parse("img.mw-100").ok()?;
-    doc.select(&sel2)
+    doc.select(&IMG_MW100_SEL)
         .next()
         .and_then(|el| el.value().attr("src"))
         .map(|s| s.to_string())
@@ -167,11 +177,7 @@ fn select_projectjav_thumbs(doc: &Html) -> Vec<String> {
 
 /// 提取演员名：.actress-item a 的文本
 fn select_actress_names(doc: &Html) -> Vec<String> {
-    let sel = match Selector::parse(".actress-item a") {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-    doc.select(&sel)
+    doc.select(&ACTRESS_SEL)
         .filter_map(|el| {
             let text: String = el.text().collect::<Vec<_>>().join(" ");
             let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -186,11 +192,7 @@ fn select_actress_names(doc: &Html) -> Vec<String> {
 
 /// 提取标签：.badge-info a 的文本
 fn select_badge_tags(doc: &Html) -> Vec<String> {
-    let sel = match Selector::parse(".badge-info a") {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-    doc.select(&sel)
+    doc.select(&BADGE_SEL)
         .filter_map(|el| {
             let text: String = el.text().collect::<Vec<_>>().join(" ");
             let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -206,20 +208,14 @@ fn select_badge_tags(doc: &Html) -> Vec<String> {
 /// 提取行式布局字段：.row 中 .col-3 为标签，.col-9 为值
 fn extract_row_fields(doc: &Html) -> std::collections::HashMap<String, String> {
     let mut fields = std::collections::HashMap::new();
-    let row_sel = match Selector::parse(".row") {
-        Ok(s) => s,
-        Err(_) => return fields,
-    };
-    let col3_sel = Selector::parse(".col-3").unwrap();
-    let col9_sel = Selector::parse(".col-9").unwrap();
 
-    for row in doc.select(&row_sel) {
+    for row in doc.select(&ROW_SEL) {
         let label = row
-            .select(&col3_sel)
+            .select(&COL3_SEL)
             .next()
             .map(|el| el.text().collect::<Vec<_>>().join(" ").trim().to_string());
         let value = row
-            .select(&col9_sel)
+            .select(&COL9_SEL)
             .next()
             .map(|el| el.text().collect::<Vec<_>>().join(" ").trim().to_string());
         if let (Some(l), Some(v)) = (label, value) {
@@ -249,8 +245,7 @@ fn normalize_date(raw: &str) -> String {
 
 /// 在页面图片中查找与番号相关的封面图（fallback）
 fn find_cover_image(doc: &Html, code_upper: &str, code_lower: &str) -> Option<String> {
-    let sel = Selector::parse("img").ok()?;
-    for el in doc.select(&sel) {
+    for el in doc.select(&IMG_SEL) {
         let src = el.value().attr("src").unwrap_or("");
         let alt = el.value().attr("alt").unwrap_or("");
         if src.contains(code_upper)

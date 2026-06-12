@@ -4,10 +4,17 @@
 //! 当前实现直接请求详情页，并优先在包含“详情”和番号的内容容器中提取字段，
 //! 以避免误采集页脚中的全站演员/制作商导航链接。
 
-use super::common::{dedup_strings, extract_head_meta, select_attr, select_text};
+use super::common::{
+    dedup_strings, extract_head_meta, select_attr, select_text, strip_from_ci, strip_prefix_ci,
+};
 use super::{SearchResult, Source};
 use scraper::{ElementRef, Html, Selector};
+use std::sync::LazyLock;
 use url::Url;
+
+// 常量选择器缓存：字面量选择器只编译一次，避免每次调用重复 parse
+static IMG_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("img").unwrap());
+static A_HREF_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href]").unwrap());
 
 pub struct JavXX;
 
@@ -208,8 +215,7 @@ fn select_text_in(root: &ElementRef<'_>, selector_str: &str) -> Option<String> {
 }
 
 fn select_first_image_in(root: &ElementRef<'_>) -> Option<String> {
-    let selector = Selector::parse("img").ok()?;
-    for image in root.select(&selector) {
+    for image in root.select(&IMG_SEL) {
         for attr in ["src", "data-src", "data-original"] {
             if let Some(value) = image.value().attr(attr) {
                 if !value.trim().is_empty() {
@@ -222,12 +228,8 @@ fn select_first_image_in(root: &ElementRef<'_>) -> Option<String> {
 }
 
 fn collect_link_texts(root: &ElementRef<'_>, href_patterns: &[&str]) -> Vec<String> {
-    let Ok(selector) = Selector::parse("a[href]") else {
-        return vec![];
-    };
-
     let mut values = Vec::new();
-    for link in root.select(&selector) {
+    for link in root.select(&A_HREF_SEL) {
         let href = link.value().attr("href").unwrap_or("");
         if !href_patterns.iter().any(|pattern| href.contains(pattern)) {
             continue;
@@ -251,10 +253,8 @@ fn clean_title(raw_title: &str) -> String {
 
 fn strip_code_prefix(title: &str, code_upper: &str) -> String {
     let trimmed = title.trim();
-    let trimmed_upper = trimmed.to_uppercase();
-    if let Some(rest) = trimmed_upper.strip_prefix(code_upper) {
-        let byte_index = trimmed.len() - rest.len();
-        return trimmed[byte_index..]
+    if trimmed.to_uppercase().starts_with(code_upper) {
+        return strip_prefix_ci(trimmed, code_upper)
             .trim_start_matches(|ch: char| ch == '-' || ch == ':' || ch == ' ' || ch == '　')
             .trim()
             .to_string();
@@ -329,10 +329,7 @@ fn extract_meta_description(doc: &Html, code_upper: &str) -> Option<String> {
     }
 
     // 去掉后缀 " missav" / " MissAV"（大小写不敏感）
-    let lower = text.to_lowercase();
-    if let Some(pos) = lower.rfind("missav") {
-        text = text[..pos].trim();
-    }
+    text = strip_from_ci(text, "missav").trim();
 
     // 二次清理：如果以逗号开头则去掉
     let text = text.trim_start_matches(|c: char| c == ',' || c == '，' || c == ' ').trim();

@@ -13,9 +13,20 @@
 //! - 分类: `a[href*="/videos/"]`（Category 区域）
 
 use scraper::{Html, Selector};
+use std::sync::LazyLock;
 
-use super::common::{dedup_strings, extract_head_meta, select_text};
+use super::common::{
+    dedup_strings, extract_head_meta, select_text, strip_from_ci, strip_prefix_ci,
+    strip_through_ci,
+};
 use super::{SearchResult, Source};
+
+// 常量选择器缓存：字面量选择器只编译一次，避免每次调用重复 parse
+static A_HREF_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href]").unwrap());
+static PLAYER_WRAPPER_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".player-wrapper").unwrap());
+static VIDEOS_HREF_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(r#"a[href*="/videos/"]"#).unwrap());
 
 pub struct Javtiful;
 
@@ -36,12 +47,7 @@ impl Source for Javtiful {
         let code_upper = code.trim().to_uppercase();
         let code_lower = code.trim().to_lowercase();
 
-        let sel = match Selector::parse("a[href]") {
-            Ok(s) => s,
-            Err(_) => return None,
-        };
-
-        for el in doc.select(&sel) {
+        for el in doc.select(&A_HREF_SEL) {
             let href = el.value().attr("href").unwrap_or("");
             if href.is_empty() || !href.contains("/video/") {
                 continue;
@@ -150,8 +156,7 @@ impl Source for Javtiful {
 
 /// 从 `.player-wrapper` 的 style background url() 提取封面 URL
 fn extract_player_bg_url(doc: &Html) -> Option<String> {
-    let sel = Selector::parse(".player-wrapper").ok()?;
-    let el = doc.select(&sel).next()?;
+    let el = doc.select(&PLAYER_WRAPPER_SEL).next()?;
     let style = el.value().attr("style")?;
     // 匹配 url('...') 或 url("...") 或 url(...)
     let start = style.find("url(")?;
@@ -174,24 +179,23 @@ fn extract_player_bg_url(doc: &Html) -> Option<String> {
 
 /// 清理标题：去掉 " - Javtiful" 后缀
 fn clean_title(raw: &str) -> String {
-    let mut t = raw.trim().to_string();
+    let t = raw.trim();
     // 去掉 " - Javtiful" 后缀（大小写不敏感）
     let lower = t.to_lowercase();
-    if let Some(pos) = lower.rfind("- javtiful") {
-        t = t[..pos].trim().to_string();
-    } else if let Some(pos) = lower.rfind("| javtiful") {
-        t = t[..pos].trim().to_string();
+    if lower.contains("- javtiful") {
+        strip_from_ci(t, "- javtiful").trim().to_string()
+    } else if lower.contains("| javtiful") {
+        strip_from_ci(t, "| javtiful").trim().to_string()
+    } else {
+        t.to_string()
     }
-    t
 }
 
 /// 清理标题：去掉 CODE 前缀
 fn strip_code_prefix(title: &str, code_upper: &str) -> String {
     let trimmed = title.trim();
-    let upper = trimmed.to_uppercase();
-    if let Some(rest) = upper.strip_prefix(code_upper) {
-        let byte_idx = trimmed.len() - rest.len();
-        return trimmed[byte_idx..]
+    if trimmed.to_uppercase().starts_with(code_upper) {
+        return strip_prefix_ci(trimmed, code_upper)
             .trim_start_matches(|c: char| c == '-' || c == ':' || c == ' ' || c == '\u{3000}')
             .trim()
             .to_string();
@@ -228,9 +232,8 @@ fn clean_description(desc: &str, code_upper: &str) -> String {
         if prefix.to_uppercase().contains(code_upper) {
             text = text[pos + 1..].trim();
         }
-    } else if let Some(pos) = text.to_uppercase().find(code_upper) {
-        let skip = pos + code_upper.len();
-        text = text[skip..].trim();
+    } else if text.to_uppercase().contains(code_upper) {
+        text = strip_through_ci(text, code_upper).trim();
     }
 
     // 去掉 "Starring By: ..." 部分
@@ -247,16 +250,9 @@ fn clean_description(desc: &str, code_upper: &str) -> String {
     }
 
     // 去掉后缀 "at Javtiful" / "In HD Quality at Javtiful"
-    let lower = result.to_lowercase();
-    if let Some(pos) = lower.rfind("at javtiful") {
-        result = result[..pos].trim().to_string();
-    }
-    if let Some(pos) = result.to_lowercase().rfind("in hd quality") {
-        result = result[..pos].trim().to_string();
-    }
-    if let Some(pos) = result.to_lowercase().rfind("in full hd quality") {
-        result = result[..pos].trim().to_string();
-    }
+    result = strip_from_ci(&result, "at javtiful").trim().to_string();
+    result = strip_from_ci(&result, "in hd quality").trim().to_string();
+    result = strip_from_ci(&result, "in full hd quality").trim().to_string();
 
     // 清理残留标点
     result = result.trim_end_matches(|c: char| c == '.' || c == ' ').trim().to_string();
@@ -266,13 +262,8 @@ fn clean_description(desc: &str, code_upper: &str) -> String {
 
 /// 按 href 模式收集链接文本（排除导航区域的重复链接）
 fn collect_link_texts_by_href(doc: &Html, pattern: &str) -> Vec<String> {
-    let sel = match Selector::parse("a[href]") {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-
     let mut values = Vec::new();
-    for el in doc.select(&sel) {
+    for el in doc.select(&A_HREF_SEL) {
         let href = el.value().attr("href").unwrap_or("");
         if !href.contains(pattern) {
             continue;
@@ -293,13 +284,8 @@ fn collect_link_texts_by_href(doc: &Html, pattern: &str) -> Vec<String> {
 
 /// 收集分类文本：a[href*="/videos/"] 且排除 sort= 和导航链接
 fn collect_category_texts(doc: &Html) -> Vec<String> {
-    let sel = match Selector::parse(r#"a[href*="/videos/"]"#) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-
     let mut values = Vec::new();
-    for el in doc.select(&sel) {
+    for el in doc.select(&VIDEOS_HREF_SEL) {
         let href = el.value().attr("href").unwrap_or("");
         // 排除排序和导航链接
         if href.contains("sort=") || href.ends_with("/videos") || href.ends_with("/videos/") {

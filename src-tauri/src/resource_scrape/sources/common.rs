@@ -50,6 +50,64 @@ pub fn select_all_attr(doc: &Html, selector_str: &str, attr: &str) -> Vec<String
         .collect()
 }
 
+/// 在原串上大小写不敏感地查找 marker，返回 marker 之前的 `&str`（找不到返回原串）
+///
+/// 注意：不能直接用 `text.to_lowercase()` 的字节位置去切 `text`，
+/// 因为 `to_lowercase()` 个别字符会改变字节长度，跨串的字节索引可能落在
+/// `text` 的某个字符中间从而 panic 或截错。此处先在小写副本上定位匹配，
+/// 再按字符数映射回原串的字节位置。
+pub fn strip_from_ci<'a>(text: &'a str, marker: &str) -> &'a str {
+    let lower = text.to_lowercase();
+    let marker_lower = marker.to_lowercase();
+    match lower.rfind(&marker_lower) {
+        Some(byte_pos) => {
+            let char_count = lower[..byte_pos].chars().count();
+            match text.char_indices().nth(char_count) {
+                Some((i, _)) => &text[..i],
+                None => text,
+            }
+        }
+        None => text,
+    }
+}
+
+/// 在原串上大小写不敏感地去掉 prefix 前缀，返回剩余部分的 `&str`（不匹配返回原串）
+///
+/// 与 `strip_from_ci` 同理：`to_uppercase()`/`to_lowercase()` 可能改变字节长度，
+/// 不能用 `text.len() - rest.len()` 这种依赖"大小写不改长度"的方式定位切点。
+pub fn strip_prefix_ci<'a>(text: &'a str, prefix: &str) -> &'a str {
+    let lower = text.to_lowercase();
+    let prefix_lower = prefix.to_lowercase();
+    if lower.starts_with(&prefix_lower) {
+        let char_count = prefix_lower.chars().count();
+        match text.char_indices().nth(char_count) {
+            Some((i, _)) => &text[i..],
+            None => "",
+        }
+    } else {
+        text
+    }
+}
+
+/// 在原串上大小写不敏感地查找首个 marker，返回 marker 之后的 `&str`（找不到返回原串）
+///
+/// 同样避免用小写副本的字节索引去切原串：先在小写副本上定位匹配，
+/// 再按字符数映射回原串的字节位置。
+pub fn strip_through_ci<'a>(text: &'a str, marker: &str) -> &'a str {
+    let lower = text.to_lowercase();
+    let marker_lower = marker.to_lowercase();
+    match lower.find(&marker_lower) {
+        Some(byte_pos) => {
+            let char_count = lower[..byte_pos + marker_lower.len()].chars().count();
+            match text.char_indices().nth(char_count) {
+                Some((i, _)) => &text[i..],
+                None => "",
+            }
+        }
+        None => text,
+    }
+}
+
 /// 字符串去重（保留顺序）
 pub fn dedup_strings(items: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();

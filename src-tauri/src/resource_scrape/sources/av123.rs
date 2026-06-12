@@ -13,9 +13,17 @@
 //! - `.detail-item` → 结构化字段（番号、日期、时长、演员、类型、系列、制作人、标签）
 //!   每行格式：`<span>标签:</span> <span>值/链接</span>`
 
-use super::common::{dedup_strings, extract_head_meta, select_text};
+use super::common::{dedup_strings, extract_head_meta, select_text, strip_from_ci};
 use super::{SearchResult, Source};
 use scraper::{Html, Selector};
+use std::sync::LazyLock;
+
+// 常量选择器缓存：字面量选择器只编译一次，避免每次调用重复 parse
+static DETAIL_ROW_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".detail-item > div").unwrap());
+static SPAN_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("span").unwrap());
+static A_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a").unwrap());
+static A_HREF_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href]").unwrap());
 
 pub struct Av123;
 
@@ -192,15 +200,9 @@ impl Source for Av123 {
 /// ```
 fn extract_detail_fields(doc: &Html) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
-    let Ok(row_sel) = Selector::parse(".detail-item > div") else {
-        return map;
-    };
-    let Ok(span_sel) = Selector::parse("span") else {
-        return map;
-    };
 
-    for row in doc.select(&row_sel) {
-        let spans: Vec<_> = row.select(&span_sel).collect();
+    for row in doc.select(&DETAIL_ROW_SEL) {
+        let spans: Vec<_> = row.select(&SPAN_SEL).collect();
         if spans.len() < 2 {
             continue;
         }
@@ -230,19 +232,9 @@ fn extract_detail_fields(doc: &Html) -> std::collections::HashMap<String, String
 
 /// 从 `.detail-item > div` 中匹配标签名的行，提取其中 `<a>` 链接文本
 fn extract_detail_link_texts(doc: &Html, labels: &[&str]) -> Vec<String> {
-    let Ok(row_sel) = Selector::parse(".detail-item > div") else {
-        return vec![];
-    };
-    let Ok(span_sel) = Selector::parse("span") else {
-        return vec![];
-    };
-    let Ok(a_sel) = Selector::parse("a") else {
-        return vec![];
-    };
-
     let mut result = Vec::new();
-    for row in doc.select(&row_sel) {
-        let spans: Vec<_> = row.select(&span_sel).collect();
+    for row in doc.select(&DETAIL_ROW_SEL) {
+        let spans: Vec<_> = row.select(&SPAN_SEL).collect();
         if spans.is_empty() {
             continue;
         }
@@ -259,7 +251,7 @@ fn extract_detail_link_texts(doc: &Html, labels: &[&str]) -> Vec<String> {
             continue;
         }
         // 提取该行所有 a 链接的文本
-        for a in row.select(&a_sel) {
+        for a in row.select(&A_SEL) {
             let text: String = a.text().collect::<Vec<_>>().join(" ");
             let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
             if !cleaned.is_empty() {
@@ -288,10 +280,10 @@ fn extract_detail_link_texts(doc: &Html, labels: &[&str]) -> Vec<String> {
 /// 格式：`{CODE} 在线观看, {ACTOR1}, {TITLE} - 123AV`
 fn parse_og_title(raw: &str, code_upper: &str) -> (String, String) {
     let lower = raw.to_lowercase();
-    let cleaned = if let Some(pos) = lower.rfind("- 123av") {
-        raw[..pos].trim()
-    } else if let Some(pos) = lower.rfind("| 123av") {
-        raw[..pos].trim()
+    let cleaned = if lower.contains("- 123av") {
+        strip_from_ci(raw, "- 123av").trim()
+    } else if lower.contains("| 123av") {
+        strip_from_ci(raw, "| 123av").trim()
     } else {
         raw.trim()
     };
@@ -343,19 +335,13 @@ fn clean_description(raw: &str, code_upper: &str) -> String {
             break;
         }
     }
-    let lower = text.to_lowercase();
-    if let Some(pos) = lower.rfind("- 123av") {
-        text = text[..pos].trim().to_string();
-    }
+    text = strip_from_ci(&text, "- 123av").trim().to_string();
     text.trim().to_string()
 }
 
 fn collect_link_texts_by_href(doc: &Html, href_patterns: &[&str]) -> Vec<String> {
-    let Ok(selector) = Selector::parse("a[href]") else {
-        return vec![];
-    };
     let mut values = Vec::new();
-    for link in doc.select(&selector) {
+    for link in doc.select(&A_HREF_SEL) {
         let href = link.value().attr("href").unwrap_or("");
         if !href_patterns.iter().any(|pattern| href.contains(pattern)) {
             continue;

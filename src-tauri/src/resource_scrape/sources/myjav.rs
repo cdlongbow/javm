@@ -18,9 +18,19 @@
 //! ```
 //! 提取：番号、类别、发布日、片商、导演、演员、时长、标签
 
-use super::common::{dedup_strings, extract_head_meta};
+use super::common::{dedup_strings, extract_head_meta, strip_from_ci, strip_prefix_ci};
 use super::{SearchResult, Source};
 use scraper::{Html, Selector};
+use std::sync::LazyLock;
+
+// 常量选择器缓存：字面量选择器只编译一次，避免每次调用重复 parse
+static DETAIL_LINE_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".detail-line").unwrap());
+static DETAIL_LABEL_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".detail-label").unwrap());
+static DETAIL_VALUE_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse(".detail-value").unwrap());
+static A_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a").unwrap());
 
 pub struct MyJav;
 
@@ -195,22 +205,10 @@ impl DetailFields {
 /// ```
 fn extract_detail_fields(doc: &Html) -> DetailFields {
     let mut rows = Vec::new();
-    let Ok(line_sel) = Selector::parse(".detail-line") else {
-        return DetailFields { rows };
-    };
-    let Ok(label_sel) = Selector::parse(".detail-label") else {
-        return DetailFields { rows };
-    };
-    let Ok(value_sel) = Selector::parse(".detail-value") else {
-        return DetailFields { rows };
-    };
-    let Ok(a_sel) = Selector::parse("a") else {
-        return DetailFields { rows };
-    };
 
-    for line in doc.select(&line_sel) {
+    for line in doc.select(&DETAIL_LINE_SEL) {
         // 提取标签名
-        let label = match line.select(&label_sel).next() {
+        let label = match line.select(&DETAIL_LABEL_SEL).next() {
             Some(el) => {
                 el.text().collect::<Vec<_>>().join("")
                     .trim()
@@ -223,7 +221,7 @@ fn extract_detail_fields(doc: &Html) -> DetailFields {
         };
 
         // 提取值区域
-        let Some(value_el) = line.select(&value_sel).next() else {
+        let Some(value_el) = line.select(&DETAIL_VALUE_SEL).next() else {
             continue;
         };
 
@@ -237,7 +235,7 @@ fn extract_detail_fields(doc: &Html) -> DetailFields {
             .to_string();
 
         // 链接文本列表
-        let link_texts: Vec<String> = value_el.select(&a_sel)
+        let link_texts: Vec<String> = value_el.select(&A_SEL)
             .filter_map(|a| {
                 let text: String = a.text().collect::<Vec<_>>().join(" ");
                 let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -264,17 +262,15 @@ fn clean_title(raw: &str, code_upper: &str) -> String {
     // 去掉 " - MyJav" / " | MyJav" 后缀（大小写不敏感）
     let lower = text.to_lowercase();
     for suffix in ["- myjav", "| myjav", "- my jav"] {
-        if let Some(pos) = lower.rfind(suffix) {
-            text = text[..pos].trim().to_string();
+        if lower.contains(suffix) {
+            text = strip_from_ci(&text, suffix).trim().to_string();
             break;
         }
     }
 
     // 去掉 "{CODE} - " / "{CODE} " 前缀
-    let upper = text.to_uppercase();
-    if let Some(rest) = upper.strip_prefix(code_upper) {
-        let byte_idx = text.len() - rest.len();
-        text = text[byte_idx..]
+    if text.to_uppercase().starts_with(code_upper) {
+        text = strip_prefix_ci(&text, code_upper)
             .trim_start_matches(|c: char| c == '-' || c == ':' || c == ' ' || c == '　')
             .trim()
             .to_string();
@@ -286,18 +282,16 @@ fn clean_title(raw: &str, code_upper: &str) -> String {
 /// 清理 description
 fn clean_description(raw: &str, code_upper: &str) -> String {
     let mut text = raw.trim().to_string();
-    let upper = text.to_uppercase();
-    if let Some(rest) = upper.strip_prefix(code_upper) {
-        let byte_idx = text.len() - rest.len();
-        text = text[byte_idx..]
+    if text.to_uppercase().starts_with(code_upper) {
+        text = strip_prefix_ci(&text, code_upper)
             .trim_start_matches(|c: char| c == '-' || c == ':' || c == ' ' || c == '　' || c == ',')
             .trim()
             .to_string();
     }
     let lower = text.to_lowercase();
     for suffix in ["- myjav", "| myjav"] {
-        if let Some(pos) = lower.rfind(suffix) {
-            text = text[..pos].trim().to_string();
+        if lower.contains(suffix) {
+            text = strip_from_ci(&text, suffix).trim().to_string();
             break;
         }
     }
