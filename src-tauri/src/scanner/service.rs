@@ -221,6 +221,15 @@ impl ScannerService {
             };
             let path = entry.path();
 
+            // 跳过符号链接，防止指向祖先目录的链接导致无限递归/栈溢出
+            if entry
+                .file_type()
+                .map(|ft| ft.is_symlink())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
             // 跳过隐藏文件/目录
             if let Some(name) = path.file_name() {
                 if name.to_string_lossy().starts_with('.') {
