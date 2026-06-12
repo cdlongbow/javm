@@ -473,6 +473,8 @@ impl TaskQueueManager {
             }
             Err(e) => {
                 log::error!("[scrape_queue] event=db_write_failed task_id={} video_id={} error={}", task_id, video_id, e);
+                // 核心数据写库失败不能再标记为已完成，应让任务失败
+                return Err(format!("写入数据库失败: {}", e));
             }
         }
 

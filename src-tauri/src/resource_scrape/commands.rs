@@ -21,15 +21,18 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_util::sync::CancellationToken;
 
-/// 搜索取消状态：存储当前搜索的 CancellationToken
+/// 搜索取消状态：存储当前搜索的 (代次, CancellationToken)。
+/// 用代次区分"是不是本次搜索的令牌"，避免按 is_cancelled() 误判清掉新搜索的令牌。
 pub struct SearchCancelState {
-    token: tokio::sync::Mutex<Option<CancellationToken>>,
+    token: tokio::sync::Mutex<Option<(u64, CancellationToken)>>,
+    next_gen: AtomicU64,
 }
 
 impl SearchCancelState {
     pub fn new() -> Self {
         Self {
             token: tokio::sync::Mutex::new(None),
+            next_gen: AtomicU64::new(0),
         }
     }
 }
@@ -263,16 +266,17 @@ pub async fn rs_search_resource(
     // 取消上一次搜索
     {
         let mut guard = search_cancel.token.lock().await;
-        if let Some(old_token) = guard.take() {
+        if let Some((_, old_token)) = guard.take() {
             old_token.cancel();
         }
     }
 
-    // 创建新的取消令牌
+    // 创建新的取消令牌（带唯一代次）
     let token = CancellationToken::new();
+    let search_gen = search_cancel.next_gen.fetch_add(1, Ordering::Relaxed);
     {
         let mut guard = search_cancel.token.lock().await;
-        *guard = Some(token.clone());
+        *guard = Some((search_gen, token.clone()));
     }
 
     log::info!(
@@ -526,8 +530,8 @@ pub async fn rs_search_resource(
     // 清理取消令牌
     {
         let mut guard = search_cancel.token.lock().await;
-        // 仅清理本次搜索创建的令牌（避免误清新搜索的令牌）
-        if guard.as_ref().map(|t| t.is_cancelled()) == Some(token.is_cancelled()) {
+        // 仅当存储的仍是本次搜索的令牌（代次一致）才清理，避免误清新搜索的令牌
+        if guard.as_ref().map(|(g, _)| *g) == Some(search_gen) {
             *guard = None;
         }
     }
@@ -552,7 +556,7 @@ pub async fn rs_cancel_search(
     // 取消令牌
     {
         let mut guard = search_cancel.token.lock().await;
-        if let Some(token) = guard.take() {
+        if let Some((_, token)) = guard.take() {
             token.cancel();
         }
     }
