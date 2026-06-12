@@ -11,6 +11,29 @@ pub mod manager;
 pub mod commands;
 pub mod image;
 
+/// 清洗文件名，作为路径组件/下载文件名使用前去除路径分隔符、`..`、
+/// Windows 非法字符与控制字符，防止路径穿越与非法文件名。
+pub fn sanitize_filename(name: &str) -> String {
+	let cleaned: String = name
+		.chars()
+		.map(|c| {
+			if "/\\:<>\"|?*".contains(c) || c.is_control() {
+				'_'
+			} else {
+				c
+			}
+		})
+		.collect();
+	// 折叠 `..` 防穿越，去掉首尾空白与点（Windows 不允许结尾点/空格）
+	let folded = cleaned.replace("..", "_");
+	let trimmed = folded.trim().trim_matches('.').trim();
+	if trimmed.is_empty() {
+		"download".to_string()
+	} else {
+		trimmed.to_string()
+	}
+}
+
 /// 解析任务实际下载目录。
 ///
 /// 约定：当任务存在文件名时，实际下载目录为 `{save_path}/{filename}`。

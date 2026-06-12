@@ -350,7 +350,9 @@ pub async fn add_download_task(
     }
 
     let id = Uuid::new_v4().to_string();
-    let filename_to_save = filename.or_else(|| extract_filename_from_url(&url));
+    let filename_to_save = filename
+        .or_else(|| extract_filename_from_url(&url))
+        .map(|name| super::sanitize_filename(&name));
 
     conn.execute(
         "INSERT INTO downloads (id, url, save_path, filename, status, created_at, updated_at)
@@ -584,6 +586,8 @@ pub async fn rename_download_task(
     if new_filename.trim().is_empty() {
         return Err("文件名不能为空".to_string());
     }
+    // 清洗文件名，防止路径穿越与非法字符
+    let new_filename = super::sanitize_filename(&new_filename);
 
     let (status, old_filename, save_path): (i32, Option<String>, String) = conn
         .query_row(

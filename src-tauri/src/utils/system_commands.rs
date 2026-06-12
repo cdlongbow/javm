@@ -185,6 +185,10 @@ pub async fn proxy_hls_request(
     url: String,
     referer: Option<String>,
 ) -> Result<(String, String), String> {
+    // 防 SSRF：仅允许 http/https，且拒绝本机/内网地址，避免前端传入任意 URL
+    // 探测内网服务（如 127.0.0.1、169.254.169.254 元数据端点）。
+    validate_proxy_target(&url)?;
+
     let client = crate::utils::proxy::apply_proxy_auto(
         wreq::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -226,4 +230,45 @@ pub async fn proxy_hls_request(
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
 
     Ok((b64, content_type))
+}
+
+/// 校验代理目标 URL：仅允许 http/https，拒绝本机/内网地址（防 SSRF）。
+fn validate_proxy_target(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|_| "无效的 URL".to_string())?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("不支持的协议: {}", other)),
+    }
+    let host = parsed.host_str().ok_or_else(|| "URL 缺少主机".to_string())?;
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err("不允许访问本机地址".to_string());
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_internal_ip(&ip) {
+            return Err("不允许访问内网/本机地址".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// 判断 IP 是否为本机/内网/链路本地等不应被代理访问的地址。
+fn is_internal_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local() // 含 169.254.169.254 云元数据
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_internal_ip(&std::net::IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 唯一本地
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 链路本地
+        }
+    }
 }
