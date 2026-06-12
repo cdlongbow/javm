@@ -137,38 +137,51 @@ pub fn run_ffmpeg_command(
         .spawn()
         .map_err(|e| format!("启动 ffmpeg 失败: {}. 请确保已安装 ffmpeg", e))?;
 
+    // 并发抽干 stdout/stderr，避免管道写满导致子进程阻塞（ffmpeg -i 会向 stderr 写大量流信息）
+    let stdout_handle = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut out, &mut buf);
+            buf
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut err| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut err, &mut buf);
+            buf
+        })
+    });
+
     let poll_interval = std::time::Duration::from_millis(100);
-    loop {
+    let status_result: Result<std::process::ExitStatus, String> = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut out) = child.stdout.take() {
-                    std::io::Read::read_to_end(&mut out, &mut stdout).ok();
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    std::io::Read::read_to_end(&mut err, &mut stderr).ok();
-                }
-                return Ok(std::process::Output {
-                    status,
-                    stdout,
-                    stderr,
-                });
-            }
+            Ok(Some(status)) => break Ok(status),
             Ok(None) => {
                 if start.elapsed() > timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!("操作超时 (限制: {}s)", timeout.as_secs()));
+                    break Err(format!("操作超时 (限制: {}s)", timeout.as_secs()));
                 }
                 std::thread::sleep(poll_interval);
             }
             Err(e) => {
                 let _ = child.kill();
-                return Err(format!("等待进程异常: {}", e));
+                let _ = child.wait();
+                break Err(format!("等待进程异常: {}", e));
             }
         }
-    }
+    };
+
+    // 进程已退出/被杀，管道 EOF，join 读取线程收集输出（成功失败都 join，避免线程泄漏）
+    let stdout = stdout_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+    let stderr = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+    let status = status_result?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// 诊断特定时间点的视频流健康状况（仅在失败时调用）
