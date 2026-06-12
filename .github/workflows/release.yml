@@ -103,14 +103,10 @@ jobs:
             nm3u8_asset_ext: .zip
             nm3u8_target: N_m3u8DL-RE.exe
             bundle_targets: nsis
-          - platform: windows
-            arch: arm64
-            runner: windows-11-arm
-            rust_target: aarch64-pc-windows-msvc
-            nm3u8_asset_key: win-arm64
-            nm3u8_asset_ext: .zip
-            nm3u8_target: N_m3u8DL-RE.exe
-            bundle_targets: nsis
+          # 暂不发布 Windows ARM64：wreq 依赖的 BoringSSL（boring-sys2）在
+          # aarch64-pc-windows-msvc 上无法汇编 ARM64 crypto 汇编（NASM 不支持
+          # ARM64），链接报 40 个 unresolved external。Windows 11 ARM64 可通过
+          # 内置 x64 仿真运行 x64 包，故仅发 x64。
 
           - platform: macos
             arch: x64
