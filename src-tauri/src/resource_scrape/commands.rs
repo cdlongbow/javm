@@ -412,7 +412,7 @@ pub async fn rs_search_resource(
                 max_webview_windows: fetch_settings.max_webview_windows,
             };
 
-            match fetcher.fetch(&app, &url, &site, fetch_options).await {
+            match fetcher.fetch(&app, &url, &site, fetch_options, &token).await {
                 Ok(html) => {
                     // 取消检查
                     if token.is_cancelled() {
@@ -439,7 +439,7 @@ pub async fn rs_search_resource(
                             name,
                             detail
                         );
-                        match fetcher.fetch(&app, &detail, &site, fetch_options).await {
+                        match fetcher.fetch(&app, &detail, &site, fetch_options, &token).await {
                             Ok(dh) => {
                                 log::info!(
                                     "[scrape_search] event=detail_fetch_succeeded source={} detail_url={} html_length={} preview={}",

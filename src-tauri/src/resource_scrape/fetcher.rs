@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Listener, Manager};
+use tokio_util::sync::CancellationToken;
 
 use super::cf_detection;
 use super::sources::ResourceSite;
@@ -216,6 +217,7 @@ impl Fetcher {
         site: &ResourceSite,
         show_webview: bool,
         max_webview_windows: usize,
+        cancel: &CancellationToken,
     ) -> Result<String, String> {
         use std::time::Instant;
 
@@ -302,6 +304,18 @@ impl Fetcher {
         loop {
             attempt += 1;
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            // 搜索被取消/被新搜索取代：立即关窗并释放槽位，不再干等到超时
+            if cancel.is_cancelled() {
+                log::info!(
+                    "[scrape_fetch] event=webview_cancelled site={} url={} label={}",
+                    site.id,
+                    url,
+                    window.label()
+                );
+                cleanup_webview_fetch(app, &window, listener_id, cf_listener_id, cf_state_listener_id, false, "failed");
+                return Err("搜索已取消".to_string());
+            }
 
             // 检测窗口是否被用户手动关闭
             if app.get_webview_window(window.label()).is_none() {
@@ -393,6 +407,7 @@ impl Fetcher {
         url: &str,
         site: &ResourceSite,
         options: FetchOptions,
+        cancel: &CancellationToken,
     ) -> Result<String, String> {
         log::info!(
             "[scrape_fetch] event=fetch_started site={} url={} webview_fallback={} visible={}",
@@ -401,6 +416,10 @@ impl Fetcher {
             options.webview_fallback_enabled,
             options.show_webview
         );
+
+        if cancel.is_cancelled() {
+            return Err("搜索已取消".to_string());
+        }
 
         match self.fetch_http(url).await {
             Ok(html) => {
@@ -418,6 +437,7 @@ impl Fetcher {
                             site,
                             options.show_webview,
                             options.max_webview_windows,
+                            cancel,
                         ).await
                     } else {
                         Err("Cloudflare 验证页，WebView 回退未启用".to_string())
@@ -435,6 +455,7 @@ impl Fetcher {
                             site,
                             options.show_webview,
                             options.max_webview_windows,
+                            cancel,
                         ).await {
                             Ok(webview_html) => Ok(webview_html),
                             Err(e) => {
@@ -477,6 +498,7 @@ impl Fetcher {
                         site,
                         options.show_webview,
                         options.max_webview_windows,
+                        cancel,
                     ).await
                 } else {
                     Err(err)

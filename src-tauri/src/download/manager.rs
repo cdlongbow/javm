@@ -468,6 +468,8 @@ async fn perform_scrape(app: &tauri::AppHandle, video_path: &str) -> Result<(), 
     // 创建 Fetcher 获取 HTML
     let http_client = fingerprint_client::shared_client()?;
     let fetcher = Fetcher::new(http_client);
+    // 自动刮削无搜索取消语义，传永不取消的令牌以保持原有抓取行为
+    let scrape_cancel = tokio_util::sync::CancellationToken::new();
 
     let fetch_settings = crate::settings::resolve_scrape_fetch_settings(&settings.scrape);
     let html = fetcher
@@ -481,6 +483,7 @@ async fn perform_scrape(app: &tauri::AppHandle, video_path: &str) -> Result<(), 
                 show_webview: fetch_settings.dev_show_webview,
                 max_webview_windows: fetch_settings.max_webview_windows,
             },
+            &scrape_cancel,
         )
         .await
         .map_err(|e| format!("获取页面失败: {}", e))?;
@@ -518,6 +521,7 @@ async fn perform_scrape(app: &tauri::AppHandle, video_path: &str) -> Result<(), 
                     show_webview: fetch_settings.dev_show_webview,
                     max_webview_windows: fetch_settings.max_webview_windows,
                 },
+                &scrape_cancel,
             )
             .await
         {

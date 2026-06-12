@@ -316,6 +316,8 @@ impl TaskQueueManager {
         // 创建 Fetcher 获取 HTML
         let http_client = fingerprint_client::shared_client()?;
         let fetcher = Fetcher::new(http_client);
+        // 队列用 is_stopped 标志控制流程，此处传永不取消的令牌以保持原有抓取行为
+        let scrape_cancel = tokio_util::sync::CancellationToken::new();
 
         let fetch_settings = crate::settings::resolve_scrape_fetch_settings(&settings.scrape);
         let fetch_options = crate::resource_scrape::fetcher::FetchOptions {
@@ -325,7 +327,7 @@ impl TaskQueueManager {
             max_webview_windows: fetch_settings.max_webview_windows,
         };
         let html = fetcher
-            .fetch(&self.app, &url, &site, fetch_options)
+            .fetch(&self.app, &url, &site, fetch_options, &scrape_cancel)
             .await
             .map_err(|e| format!("获取页面失败: {}", e))?;
 
@@ -351,7 +353,7 @@ impl TaskQueueManager {
                 scrape_count: None,
             };
             match fetcher
-                .fetch(&self.app, &detail_url, &detail_site, fetch_options)
+                .fetch(&self.app, &detail_url, &detail_site, fetch_options, &scrape_cancel)
                 .await
             {
                 Ok(dh) => {
