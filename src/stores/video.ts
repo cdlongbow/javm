@@ -1,12 +1,14 @@
 // 视频状态管理
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, shallowRef, computed } from 'vue'
 import type { Video, VideoFilter, Publisher, Tag, Directory } from '@/types'
 import { getVideos } from '@/lib/tauri'
 
 export const useVideoStore = defineStore('video', () => {
     // ============ State ============
-    const videos = ref<Video[]>([])
+    // 列表只读展示，用 shallowRef 避免上千个 Video 对象被逐字段深度代理；
+    // 所有写操作都整体替换数组（见 fetchVideos/updateVideo/removeVideo）以触发更新。
+    const videos = shallowRef<Video[]>([])
     const publishers = ref<Publisher[]>([]) // Was studios
     const tags = ref<Tag[]>([])
     const directories = ref<Directory[]>([])
@@ -120,8 +122,6 @@ export const useVideoStore = defineStore('video', () => {
 
         // 刮削状态过滤
         if (filter.value.scraped && filter.value.scraped.length > 0) {
-            console.log('刮削状态筛选:', filter.value.scraped)
-            const beforeCount = result.length
             result = result.filter(v => {
                 // 已刮削：状态为 Completed (2)
                 const isScraped = v.scanStatus === 2
@@ -146,7 +146,6 @@ export const useVideoStore = defineStore('video', () => {
                 
                 return true
             })
-            console.log(`刮削状态筛选: ${beforeCount} -> ${result.length}`)
         }
 
         // 状态过滤
@@ -309,7 +308,10 @@ export const useVideoStore = defineStore('video', () => {
     function updateVideo(id: string, data: Partial<Video>) {
         const index = videos.value.findIndex(v => v.id === id)
         if (index !== -1) {
-            videos.value[index] = { ...videos.value[index], ...data }
+            // shallowRef 下需整体替换数组才能触发更新
+            const next = videos.value.slice()
+            next[index] = { ...next[index], ...data }
+            videos.value = next
         }
     }
 
