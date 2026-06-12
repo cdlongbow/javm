@@ -27,3 +27,9 @@ src-tauri/bin/*
 
 # Claude Code 个人配置
 .claude/settings.local.json
+
+# Reasonix 本地状态（会话主题、缓存）
+.reasonix/
+
+# CodeGraph 代码索引数据库（机器本地生成）
+.codegraph/

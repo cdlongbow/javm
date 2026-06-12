@@ -8,3 +8,6 @@
 
 # CI 和本地构建会按当前平台动态放置下载器二进制
 /bin/N_m3u8DL-RE*
+
+# 解析器体检 harness 抓取的临时 HTML（含外站内容，勿提交）
+/examples/out/
