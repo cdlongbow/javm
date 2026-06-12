@@ -385,6 +385,12 @@ pub async fn capture_random_frames_streaming(
     // 但是第一帧强制设置在 0.0s。
     let segment_size = duration / actual_count as f64;
 
+    // 有界并发截帧：每帧一个 ffmpeg 进程，但不再逐帧 await 串行，
+    // 而是 Semaphore 限并发、JoinSet 并行驱动，完成一个就 emit 一个（先到先出）。
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let mut set: tokio::task::JoinSet<Option<(f64, std::path::PathBuf, CaptureResult)>> =
+        tokio::task::JoinSet::new();
+
     for i in 0..actual_count {
         if cancel_token.is_cancelled() {
             break;
@@ -399,36 +405,45 @@ pub async fn capture_random_frames_streaming(
             base + random_offset
         };
 
-        if hit_seek_limit && offset > max_seekable {
-            continue;
-        }
-
         let output_path = temp_dir.join(format!("frame_{}.jpg", i + 1));
         let output_path_str = output_path.to_string_lossy().to_string();
         let video_path_owned = video_path.to_string();
         let frame_idx = i + 1;
-        let seek_time = offset;
+        let sem = semaphore.clone();
 
-        let result = tokio::task::spawn_blocking(move || {
-            try_capture_single_frame(&video_path_owned, seek_time, &output_path_str, frame_idx)
-        })
-        .await
-        .map_err(|e| format!("Task join error: {}", e))?;
+        set.spawn(async move {
+            let _permit = sem.acquire_owned().await.ok()?;
+            let res = tokio::task::spawn_blocking(move || {
+                try_capture_single_frame(&video_path_owned, offset, &output_path_str, frame_idx)
+            })
+            .await
+            .ok()?;
+            Some((offset, output_path, res))
+        });
+    }
 
-        match result {
+    // 串行学习已不适用，改为收集超时帧的最小 offset 推导可 seek 上限
+    let mut timed_out_min: Option<f64> = None;
+    while let Some(joined) = set.join_next().await {
+        let Ok(Some((offset, output_path, res))) = joined else {
+            continue;
+        };
+        match res {
             CaptureResult::Success => {
                 let path_str = output_path.to_string_lossy().to_string();
                 let _ = app.emit("capture-frame-ready", &path_str);
                 frame_paths.push(path_str);
             }
             CaptureResult::TimedOut => {
-                if !hit_seek_limit {
-                    max_seekable = offset * 0.8;
-                    hit_seek_limit = true;
-                }
+                timed_out_min = Some(timed_out_min.map_or(offset, |m: f64| m.min(offset)));
             }
             CaptureResult::Failed(_) => {}
         }
+    }
+
+    if let Some(min_offset) = timed_out_min {
+        max_seekable = min_offset * 0.8;
+        hit_seek_limit = true;
     }
 
     // seek 上限导致截图太少时，在可 seek 范围内补充
