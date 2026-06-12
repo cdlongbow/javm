@@ -786,6 +786,15 @@ watch(() => settingsStore.settings, async (newSettings) => {
                   </Select>
                 </div>
 
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <p class="font-medium">HTTP 失败回退 WebView</p>
+                    <p class="text-sm text-muted-foreground">遇到 HTTP 抓取失败、Cloudflare 验证或年龄确认页时，弹出窗口让你手动通过后继续抓取</p>
+                  </div>
+                  <Switch :model-value="!!localSettings.scrape.webviewFallbackEnabled"
+                    @update:model-value="(v: boolean) => { localSettings.scrape.webviewFallbackEnabled = v; saveScrapeSettings() }" />
+                </div>
+
                 <template v-if="isDeveloperMode">
                   <Separator />
 
@@ -802,15 +811,6 @@ watch(() => settingsStore.settings, async (newSettings) => {
                       </div>
                       <Switch :model-value="!!localSettings.scrape.webviewEnabled"
                         @update:model-value="(v: boolean) => { localSettings.scrape.webviewEnabled = v; saveScrapeSettings() }" />
-                    </div>
-
-                    <div class="flex items-center justify-between gap-4">
-                      <div>
-                        <p class="font-medium">HTTP 失败回退 WebView</p>
-                        <p class="text-sm text-muted-foreground">当 HTTP 失败、命中 Cloudflare 验证或明显返回错页时，自动回退到 WebView</p>
-                      </div>
-                      <Switch :model-value="!!localSettings.scrape.webviewFallbackEnabled"
-                        @update:model-value="(v: boolean) => { localSettings.scrape.webviewFallbackEnabled = v; saveScrapeSettings() }" />
                     </div>
 
                     <div class="flex items-center justify-between gap-4">
