@@ -53,12 +53,12 @@ impl Database {
         Self::open_tuned(&self.path)
     }
 
-    /// 打开连接并应用并发调优：5 秒忙等避免并发写时 SQLITE_BUSY 立即失败，
-    /// WAL 模式提升读写并发（WAL 是数据库级持久设置，设一次即生效）。
+    /// 打开连接并应用每连接调优：5 秒忙等避免并发写时 SQLITE_BUSY 立即失败。
+    /// WAL 是数据库级持久设置，只在 `init()` 设置一次即对后续所有连接生效，
+    /// 无需每次打开连接（全库 100+ 处调用，含高频路径）都重设。
     fn open_tuned(path: &std::path::Path) -> Result<Connection> {
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         Ok(conn)
     }
 
@@ -118,6 +118,8 @@ impl Database {
         let conn = self.get_connection()?;
         log::info!("[db] event=connection_established db_path={}", self.path.display());
 
+        // WAL 是数据库级持久设置，启动初始化时设置一次即对后续所有连接长期生效
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute("PRAGMA foreign_keys = ON", [])?;
 
         // 1. 元数据表
