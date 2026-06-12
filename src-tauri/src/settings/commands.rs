@@ -15,8 +15,20 @@ pub async fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
         return Ok(AppSettings::default());
     }
 
-    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let mut settings: AppSettings = serde_json::from_str(&content).unwrap_or_default();
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut settings: AppSettings = match serde_json::from_str(&content) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("[settings] 解析 settings.json 失败，将使用默认设置: {}", e);
+            // 备份损坏文件，避免后续 save 直接覆盖、丢失用户原始配置
+            let backup = path.with_extension("json.bak");
+            match fs::copy(&path, &backup) {
+                Ok(_) => log::info!("[settings] 已备份损坏的设置文件到 {}", backup.display()),
+                Err(be) => log::warn!("[settings] 备份损坏的设置文件失败: {}", be),
+            }
+            AppSettings::default()
+        }
+    };
 
     // 解密API Key
     decrypt_settings(&mut settings);

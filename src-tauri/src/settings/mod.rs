@@ -29,18 +29,38 @@ pub struct AppSettings {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ThemeSettings {
+    #[serde(default = "default_theme_mode")]
     pub mode: String,
+    #[serde(default = "default_language")]
     pub language: String,
     #[serde(default)]
     pub proxy: ProxySettings,
 }
 
+fn default_theme_mode() -> String {
+    "system".to_string()
+}
+
+fn default_language() -> String {
+    "zh-CN".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProxySettings {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default = "default_proxy_type")]
     pub proxy_type: String,
+    #[serde(default)]
     pub host: String,
+    #[serde(default = "default_proxy_port")]
     pub port: u16,
+}
+
+fn default_proxy_type() -> String {
+    "system".to_string()
+}
+
+fn default_proxy_port() -> u16 {
+    7890
 }
 
 impl Default for ProxySettings {
@@ -55,6 +75,7 @@ impl Default for ProxySettings {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GeneralSettings {
+    #[serde(default)]
     pub scan_paths: Vec<String>,
     #[serde(rename = "viewMode", default = "default_view_mode")]
     pub view_mode: String,
