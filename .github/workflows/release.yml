@@ -145,6 +145,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Clean existing release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repo = '${{ github.repository }}'
+          $releaseId = '${{ needs.prepare_release.outputs.release_id }}'
+
+          if ([string]::IsNullOrWhiteSpace($releaseId)) {
+            Write-Host '缺少 release_id，跳过资产清理。'
+            exit 0
+          }
+
+          try {
+            $assets = gh api "repos/$repo/releases/$releaseId/assets" --jq '.[].name' 2>$null
+            if ($assets) {
+              foreach ($asset in $assets) {
+                if ($asset -and $asset.Trim()) {
+                  Write-Host "删除已存在的资产: $asset"
+                  gh api --method DELETE "repos/$repo/releases/$releaseId/assets/$asset" 2>$null || true
+                }
+              }
+            } else {
+              Write-Host '该 release 没有已存在的资产。'
+            }
+          } catch {
+            Write-Host "清理资产时出现异常（可忽略）: $_"
+          }
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
