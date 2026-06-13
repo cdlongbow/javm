@@ -747,7 +747,10 @@ const totalColumnsWidth = computed(() =>
         <div class="space-y-4 py-4">
           <div class="space-y-2">
             <Label for="rename-filename">文件名</Label>
+            <!-- 微软雅黑 + 宽松行高/加高：避免 Segoe UI 的下划线在 WebView 紧凑输入框里被裁成空格 -->
             <Input id="rename-filename" v-model="renameFilename" placeholder="输入新的文件名" type="text"
+              class="h-11"
+              style="font-family: 'Microsoft YaHei', '微软雅黑', sans-serif; line-height: 1.7;"
               @keyup.enter="handleRenameTask" />
           </div>
         </div>
