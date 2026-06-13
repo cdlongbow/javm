@@ -249,14 +249,16 @@ const handleBatchStop = async () => {
 }
 
 const handleBatchRetry = async () => {
-  // 有勾选时只开始勾选的任务，否则开始全部未完成任务（均排除已完成）
+  // 只启动“未在进行中”的任务（排队/失败/已取消/已暂停），
+  // 跳过正在准备/下载/合并/刮削及已完成的，避免把进行中的任务重置重下、丢失进度。
+  const ACTIVE_OR_DONE = ['preparing', 'downloading', 'merging', 'scraping', 'completed']
   const hasSelection = downloadStore.selectedIds.length > 0
   const source = hasSelection ? downloadStore.selectedTasks : downloadStore.tasks
-  const incompleteTasks = source.filter(t => t.status !== 'completed')
-  const taskIds = incompleteTasks.map(t => t.id)
+  const startableTasks = source.filter(t => !ACTIVE_OR_DONE.includes(t.status))
+  const taskIds = startableTasks.map(t => t.id)
 
   if (taskIds.length === 0) {
-    toast.info(hasSelection ? '勾选的任务都已完成，无需开始' : '没有任务需要开始')
+    toast.info(hasSelection ? '勾选的任务没有需要开始的' : '没有需要开始的任务')
     return
   }
 
