@@ -110,3 +110,57 @@ javsub · javhd.icu · javangel · javpub · ichiav · pussyav · javplatform ·
 avgle · javdoe · javwhores · erito · tokyomotion · jable.tv · netflav · freejavonline ·
 fyav · fujiav · javfree · javmix · bteat · javme.xyz · javhihi · javbangers · javfull ·
 javbests · javplayer · javdaddy
+
+## 视频下载链接 HTTP 连通性测试（番号 ssis-666/777/888，2026-06-13）
+
+工具：`cargo run --example link_check`（Chrome 指纹 HTTP 客户端 + 代理，与刮削体检
+`parser_check` 分离）。判定：HTTP 抓到的页面含视频信号（.m3u8 / .mp4 / source / 播放器库 /
+iframe），任一番号命中即 ☑️。
+
+**重要局限**：纯 HTTP 不执行 JS。锚点 jable、missav（应用内 WebView 实际可用）在 HTTP 下
+均 403，说明视频站多有 CF/JS 保护、播放地址由脚本注入。故 ❌ 仅表示"HTTP 抓不到"，
+**不代表应用内 WebView 也拿不到**；视频链接站的权威测试仍以 WebView 查找为准。
+
+纯 HTTP 即可命中视频信号（☑️）：
+☑️ thisav2 — mp4/source/iframe（已对应查找器 thisav）
+☑️ njav    — mp4（已在查找器）
+☑️ javct   — 播放器库（已在查找器）
+☑️ tktube  — mp4（🆕 未接入）
+☑️ vjav    — 播放器库（🆕）
+☑️ javhub  — mp4/iframe（🆕）
+☑️ erito   — mp4/播放器库（🆕）
+☑️ ichiav  — iframe（🆕）
+☑️ netflav — iframe（🆕）
+
+HTTP 下 ❌（被拦/跳转/不可达/无信号，未必 WebView 不可用）：
+supjav(403) · jable(403) · missav(403) · javdock(301) · javhdporn(301) · hpjav(302) ·
+24av(301) · pussyav(302) · tokyomotion(301) · javbangers(301) · javeng(301) · jav.wine(301) ·
+javquick(404) · jav.spa(404) · new-jav/javpub/avgle/javwhores/freejavonline/fujiav/javfree/
+bteat/javbests/javdaddy(不可达) · javhaven/javraveclub/javpornhd/javhd.today/javenglish/
+javtsunami/javsub/javhd.icu/javangel/javplatform/javfor.me/javdoe/javmix/javme.xyz/javhihi/
+javfull/javplayer/fyav(200 但无信号，可能 URL 猜测不符或 JS 注入)
+
+## 视频链接 隐藏 WebView 实测（番号 SSIS-666，2026-06-13）
+
+工具：`JAVM_LINK_PROBE=link_probe_targets.json cargo run`（dev 专用，见
+`src-tauri/src/resource_scrape/link_probe.rs`）。用应用真实的隐藏 WebView 流程
+（反检测脚本 + INTERCEPT_JS 拦截 + 自动跳转搜索结果 + 触发播放）批量探测约 40 个在线站。
+
+能抓到视频链接（☑️）：
+☑️ missav / jable / njav — 锚点，已在查找器
+☑️ javhub  — 抓到 mp4，但详情页是 token 链接 /play/{token}/，按番号搜索未精确命中，需先搜索解析
+☑️ javfull — https://javfull.net/{code}/ 直达详情、抓到 mp4（番号 slug，干净，适合接入）
+
+到达正确详情页但抓不到（跨域 iframe 播放器，顶层注入的固有限制，应用同样抓不到）：
+❌ javhdporn(/zh/video/{code}/) — 页面存在但播放器在跨域 iframe 内
+
+其余 ❌ 原因（由 final_url 诊断）：
+- 无该番号结果 / 搜索页 JS 未出结果：supjav · erito · netflav · javhaven · javraveclub ·
+  javhd.icu · javfor.me · javme.xyz · javhihi · javplatform · javplayer · freejavonline
+- 被拦 / 跳转 / 域名变更：tktube(→login) · 24av(→域名跳转) · javhd.com(404) ·
+  tokyomotion(搜索参数不符) · avgle/hpjav/javdock/javbangers(about:blank，加载失败)
+- 跳到无关页：vjav(latest-updates) · ichiav/pussyav/new-jav(跟进到非目标视频)
+
+结论：在线站点绝大多数要么不收录该番号、要么被 CF/跳转挡住、要么播放器在跨域 iframe
+（顶层拦截抓不到，与应用一致）。按番号 slug 直达且能抓到的新站只有 **javfull**。
+探测框架已就位，后续换番号/加候选改 link_probe_targets.json 重跑即可，无需人工点 UI。

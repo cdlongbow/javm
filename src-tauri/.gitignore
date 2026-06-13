@@ -11,3 +11,9 @@
 
 # 解析器体检 harness 抓取的临时 HTML（含外站内容，勿提交）
 /examples/out/
+
+# 视频链接探测的本地运行产物（含外站链接，勿提交；保留 .sample.json 作模板）
+/link_probe_results*.json
+/link_probe_targets.json
+/probe_*.log
+/probe_run.log

@@ -161,6 +161,20 @@ pub fn run() {
                 utils::proxy::init(&config_dir);
             }
 
+            // 视频链接探测模式（仅 dev）：设置 JAVM_LINK_PROBE 时进入无头批量探测，
+            // 跑完写结果并退出，不做后续常规初始化。详见 resource_scrape::link_probe。
+            #[cfg(debug_assertions)]
+            if std::env::var("JAVM_LINK_PROBE").map(|v| !v.trim().is_empty()).unwrap_or(false) {
+                if let Some(main_window) = app.handle().get_webview_window("main") {
+                    let _ = main_window.hide();
+                }
+                let probe_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    resource_scrape::link_probe::run(probe_handle).await;
+                });
+                return Ok(());
+            }
+
             let db = db::Database::new(app.handle())
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             db.check_and_reset_if_needed();
@@ -344,6 +358,7 @@ pub fn run() {
             resource_scrape::commands::rs_find_video_links,
             resource_scrape::commands::rs_close_video_finder,
             resource_scrape::commands::rs_get_video_sites,
+            resource_scrape::commands::rs_analyze_hls,
             resource_scrape::commands::rs_check_video_exists_by_code,
         ])
         .run(tauri::generate_context!())

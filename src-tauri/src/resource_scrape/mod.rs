@@ -19,3 +19,6 @@ pub mod queue_manager;
 pub mod video_finder;
 pub mod fingerprint_client;
 pub mod webview_support;
+/// 视频链接探测框架，仅 debug 构建编译，用于 AI/开发者批量筛选候选站点
+#[cfg(debug_assertions)]
+pub mod link_probe;
