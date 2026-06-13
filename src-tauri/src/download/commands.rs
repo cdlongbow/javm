@@ -652,20 +652,40 @@ pub async fn retry_download_task(app: AppHandle, task_id: String) -> Result<(), 
 
 #[tauri::command]
 pub async fn delete_download_task(app: AppHandle, task_id: String) -> Result<(), String> {
+    // 先停止任务：终止下载进程、移出队列/执行集，释放文件句柄。
+    // 否则删除仅移除 DB 记录，下载进程变孤儿继续运行，且占用目录导致无法删除。
+    if let Some(manager) = app.try_state::<crate::download::manager::DownloadManager>() {
+        let _ = manager.stop_task(&task_id).await;
+    }
+
     let db = Database::new(&app).map_err(|e| e.to_string())?;
     let conn = db.get_connection().map_err(|e| e.to_string())?;
 
-    let temp_path: Option<String> = conn
+    let info: Option<(i32, String, Option<String>, Option<String>)> = conn
         .query_row(
-            "SELECT temp_path FROM downloads WHERE id = ?",
+            "SELECT status, save_path, filename, temp_path FROM downloads WHERE id = ?",
             [&task_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3).ok())),
         )
         .ok();
 
-    if let Some(path) = temp_path {
-        if std::path::Path::new(&path).exists() {
-            let _ = std::fs::remove_file(&path);
+    if let Some((status, save_path, filename, temp_path)) = info {
+        // 清理遗留临时文件
+        if let Some(path) = temp_path {
+            if std::path::Path::new(&path).exists() {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+
+        // 未完成的任务：清理其工作目录（含 .tmp 分片等残留）；已完成的保留成品视频。
+        if status != 6 {
+            if let Some(name) = filename.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                let work_dir = crate::download::resolve_task_save_dir(&save_path, Some(name));
+                // 安全校验：必须是 save_path 下的子目录，避免误删 save_path 本身
+                if work_dir != std::path::Path::new(&save_path) && work_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&work_dir);
+                }
+            }
         }
     }
 
@@ -676,6 +696,39 @@ pub async fn delete_download_task(app: AppHandle, task_id: String) -> Result<(),
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+/// 重命名进行中（下载中/合并中/失败重试）的任务时，把工作目录（含 .tmp 分片）
+/// 从旧文件名目录整体迁移到新文件名目录，使下载器可基于已下载分片续传，避免清零重下。
+/// 返回 Ok(true) 表示已迁移（旧目录存在且移动成功），Ok(false) 表示无需迁移。
+fn move_inprogress_download_dir(
+    save_path: &str,
+    old_filename: &str,
+    new_filename: &str,
+) -> Result<bool, String> {
+    let old_dir = crate::download::resolve_task_save_dir(save_path, Some(old_filename));
+    let new_dir = crate::download::resolve_task_save_dir(save_path, Some(new_filename));
+
+    if old_dir == new_dir || !old_dir.exists() {
+        return Ok(false);
+    }
+
+    if let Some(parent) = new_dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+    // 目标目录若已存在（如同名旧任务的残留），先清理以便整体迁移
+    if new_dir.exists() {
+        std::fs::remove_dir_all(&new_dir).map_err(|e| format!("清理目标目录失败: {}", e))?;
+    }
+    std::fs::rename(&old_dir, &new_dir).map_err(|e| {
+        format!(
+            "迁移下载目录失败: {} -> {}: {}",
+            old_dir.display(),
+            new_dir.display(),
+            e
+        )
+    })?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -722,26 +775,67 @@ pub async fn rename_download_task(
                 .map_err(|e| e.to_string())?;
         }
         2 | 3 | 7 => {
-            // Downloading, Merging, Retrying: stop, reset, rename, and enqueue
+            // 下载中/合并中/失败重试：先停止旧进程
             if let Some(manager) = app.try_state::<crate::download::manager::DownloadManager>() {
                 let _ = manager.stop_task(&task_id).await;
             }
 
-            conn.execute(
-                "UPDATE downloads SET filename = ?, status = 0, downloaded_bytes = 0, progress = 0, error_message = NULL, updated_at = datetime('now') WHERE id = ?",
-                rusqlite::params![new_filename, task_id],
-            )
-            .map_err(|e| e.to_string())?;
+            // 尝试把工作目录（含已下载分片）迁到新文件名目录以保留进度；
+            // 迁移失败（被占用/不存在）则回退为重新下载。
+            let preserved = match &old_filename {
+                Some(old) => move_inprogress_download_dir(&save_path, old, &new_filename)
+                    .unwrap_or_else(|e| {
+                        log::warn!(
+                            "[download] event=rename_move_dir_failed task_id={} action=restart_fresh error={}",
+                            task_id,
+                            e
+                        );
+                        false
+                    }),
+                None => false,
+            };
+
+            if preserved {
+                // 保留已下载字节/进度，重排后下载器基于 .tmp 分片续传
+                conn.execute(
+                    "UPDATE downloads SET filename = ?, status = 0, error_message = NULL, updated_at = datetime('now') WHERE id = ?",
+                    rusqlite::params![new_filename, task_id],
+                )
+                .map_err(|e| e.to_string())?;
+            } else {
+                conn.execute(
+                    "UPDATE downloads SET filename = ?, status = 0, downloaded_bytes = 0, progress = 0, error_message = NULL, updated_at = datetime('now') WHERE id = ?",
+                    rusqlite::params![new_filename, task_id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
 
             app.emit("download-task-renamed", &task_id)
                 .map_err(|e| e.to_string())?;
 
+            // 进度事件：保留进度时回报当前已下载值（避免进度条闪回 0）
+            let (downloaded, total, progress): (u64, u64, f64) = if preserved {
+                conn.query_row(
+                    "SELECT downloaded_bytes, total_bytes, progress FROM downloads WHERE id = ?",
+                    [&task_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0).unwrap_or(0) as u64,
+                            row.get::<_, Option<i64>>(1)?.unwrap_or(0) as u64,
+                            row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                        ))
+                    },
+                )
+                .unwrap_or((0, 0, 0.0))
+            } else {
+                (0, 0, 0.0)
+            };
             let progress_payload = crate::download::manager::DownloadProgress {
                 task_id: task_id.clone(),
-                progress: 0.0,
+                progress,
                 speed: 0,
-                downloaded: 0,
-                total: 0,
+                downloaded,
+                total,
                 status: 0,
             };
             app.emit("download-progress", &progress_payload).ok();
