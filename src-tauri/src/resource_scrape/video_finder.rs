@@ -319,16 +319,16 @@ pub fn open_video_finder_webview(
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 
-    // 开发和 Release 都默认隐藏；仅在遇到 CF 时由共享逻辑自动显示。
-    let is_visible = false;
+    // 默认可见但使用极小尺寸（1×1），确保 WebView2 能正常渲染/执行 JS
+    // 同时不打扰用户；仅在遇到 CF 验证时自动放大并居中。
+    let is_visible = true;
     let data_directory = webview_support::persistent_data_directory(app)?;
 
     let anti_detection_js = webview_support::build_anti_detection_script();
     let builder =
         WebviewWindowBuilder::new(app, VIDEO_FINDER_LABEL, WebviewUrl::External(parsed_url.clone()))
             .title(format!("查找视频链接 - {}", code.to_uppercase()))
-            .inner_size(1920.0, 1080.0)
-            .center()
+            .inner_size(1.0, 1.0)
             .visible(is_visible)
             .user_agent(webview_support::WEBVIEW_USER_AGENT)
             .initialization_script(&anti_detection_js)
@@ -392,6 +392,8 @@ pub fn open_video_finder_webview(
             }
 
             if was_active && saw_cf_for_listener.swap(false, Ordering::Relaxed) {
+                // CF 验证通过后：缩小窗口并隐藏
+                let _ = window_for_listener.set_size(tauri::PhysicalSize::new(1u32, 1u32));
                 let _ = window_for_listener.hide();
                 if let Err(err) = window_for_listener.navigate(target_url_for_listener.clone()) {
                     log::error!(

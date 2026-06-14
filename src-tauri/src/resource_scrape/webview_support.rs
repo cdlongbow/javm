@@ -142,6 +142,9 @@ pub fn listen_cf_visibility(
 
 pub fn sync_window_visibility(window: &WebviewWindow, visible: bool) {
     if visible {
+        // CF 弹窗时放大到正常尺寸并居中
+        let _ = window.set_size(tauri::PhysicalSize::new(1920u32, 1080u32));
+        let _ = window.center();
         let _ = window.show();
     } else {
         let _ = window.hide();
