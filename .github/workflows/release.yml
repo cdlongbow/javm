@@ -419,7 +419,9 @@ jobs:
           Expand-Archive -Path $zip.FullName -DestinationPath $extractDir -Force
 
           $ffmpegBin = if ('${{ matrix.platform }}' -eq 'windows') { 'ffmpeg.exe' } else { 'ffmpeg' }
-          $ffmpeg = Get-ChildItem $extractDir -Recurse -Filter $ffmpegBin | Select-Object -First 1
+          # 必须加 -File：压缩包内除 bin/ffmpeg 可执行文件外，还有同名的 share/ffmpeg 目录，
+          # 不加 -File 时 -First 1 可能误选目录（arm64 即因此失败）。
+          $ffmpeg = Get-ChildItem $extractDir -Recurse -File -Filter $ffmpegBin | Select-Object -First 1
 
           if (-not $ffmpeg) {
             throw "解压后未找到 $ffmpegBin。"
