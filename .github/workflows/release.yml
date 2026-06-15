@@ -87,6 +87,47 @@ jobs:
 
           "release_id=$releaseId" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      - name: Clean existing release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 5
+        run: |
+          $repo = '${{ github.repository }}'
+          $releaseId = '${{ steps.resolve_release_id.outputs.release_id }}'
+
+          if ([string]::IsNullOrWhiteSpace($releaseId)) {
+            Write-Host '缺少 release id，跳过资产清理。'
+            exit 0
+          }
+
+          Write-Host "检查 release $releaseId 的已存在资产..."
+
+          try {
+            $assetsJson = gh api "repos/$repo/releases/$releaseId/assets" 2>$null
+
+            if ([string]::IsNullOrWhiteSpace($assetsJson)) {
+              Write-Host 'API 返回空响应，跳过清理。'
+              exit 0
+            }
+
+            $assets = $assetsJson | ConvertFrom-Json
+
+            if ($null -eq $assets -or $assets.Count -eq 0) {
+              Write-Host '该 release 没有已存在的资产。'
+              exit 0
+            }
+
+            foreach ($asset in $assets) {
+              if ($asset.id -and $asset.name) {
+                Write-Host "删除资产: $($asset.name) (ID: $($asset.id))"
+                gh api --method DELETE "repos/$repo/releases/$releaseId/assets/$($asset.id)" 2>$null
+              }
+            }
+          } catch {
+            Write-Host "清理资产时出现异常（可忽略）: $_"
+          }
+
   build-release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: prepare_release
@@ -145,59 +186,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Clean existing release assets
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        timeout-minutes: 5
-        run: |
-          $repo = '${{ github.repository }}'
-          $tag = "${{ github.ref_name }}"
-
-          Write-Host "检查 release $tag 是否存在..."
-          
-          try {
-            $releaseJson = gh api "repos/$repo/releases/tags/$tag" 2>$null
-            
-            if ([string]::IsNullOrWhiteSpace($releaseJson)) {
-              Write-Host 'Release 不存在，跳过清理。'
-              exit 0
-            }
-            
-            $release = $releaseJson | ConvertFrom-Json
-            $releaseId = $release.id
-            
-            if ([string]::IsNullOrWhiteSpace($releaseId)) {
-              Write-Host '无法获取 release ID，跳过清理。'
-              exit 0
-            }
-            
-            Write-Host "找到 release ID: $releaseId，检查资产..."
-            
-            $assetsJson = gh api "repos/$repo/releases/$releaseId/assets" 2>$null
-            
-            if ([string]::IsNullOrWhiteSpace($assetsJson)) {
-              Write-Host 'API 返回空响应，跳过清理。'
-              exit 0
-            }
-            
-            $assets = $assetsJson | ConvertFrom-Json
-            
-            if ($null -eq $assets -or $assets.Count -eq 0) {
-              Write-Host '该 release 没有已存在的资产。'
-              exit 0
-            }
-            
-            foreach ($asset in $assets) {
-              if ($asset.id -and $asset.name) {
-                Write-Host "删除资产: $($asset.name) (ID: $($asset.id))"
-                gh api --method DELETE "repos/$repo/releases/$releaseId/assets/$($asset.id)" 2>$null
-              }
-            }
-          } catch {
-            Write-Host "清理资产时出现异常（可忽略）: $_"
-          }
-
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -208,9 +196,24 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
+      - name: Print build environment
+        shell: pwsh
+        run: |
+          Write-Host "::group::构建环境"
+          Write-Host "平台          : ${{ matrix.platform }}-${{ matrix.arch }}"
+          Write-Host "Runner        : ${{ matrix.runner }}"
+          Write-Host "Rust target   : ${{ matrix.rust_target }}"
+          Write-Host "Bundle targets: ${{ matrix.bundle_targets }}"
+          Write-Host "Tag           : ${{ github.ref_name }}"
+          Write-Host "rustc         : $(rustc --version)"
+          Write-Host "cargo         : $(cargo --version)"
+          Write-Host "bun           : $(bun --version)"
+          Write-Host "::endgroup::"
+
       - name: Install Linux build dependencies
         if: matrix.platform == 'linux'
         run: |
+          echo "::group::安装 Linux 系统依赖"
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -222,6 +225,7 @@ jobs:
             libxdo-dev \
             libssl-dev \
             xdg-utils
+          echo "::endgroup::"
 
       - name: Cache Rust build artifacts
         uses: swatinem/rust-cache@v2
@@ -262,8 +266,15 @@ jobs:
             throw "版本不一致。tag=$version, $($mismatches -join ', ')"
           }
 
+          Write-Host "✅ 版本一致性校验通过：package.json / tauri.conf.json / Cargo.toml 均为 $version"
+
       - name: Install frontend dependencies
-        run: bun install --frozen-lockfile
+        shell: pwsh
+        run: |
+          Write-Host "::group::安装前端依赖（bun install --frozen-lockfile）"
+          bun install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw "bun install 失败（exit=$LASTEXITCODE）。" }
+          Write-Host "::endgroup::"
 
       - name: Validate release updater config
         shell: pwsh
@@ -287,11 +298,14 @@ jobs:
             throw '缺少 Secret TAURI_SIGNING_PRIVATE_KEY，无法生成 updater 签名。'
           }
 
+          Write-Host "✅ updater 配置与签名密钥校验通过（pubkey / endpoints / 私钥 均就绪）"
+
       - name: Download N_m3u8DL-RE
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          Write-Host "::group::下载 N_m3u8DL-RE sidecar（${{ matrix.nm3u8_asset_key }}${{ matrix.nm3u8_asset_ext }}）"
           $releaseApi = 'https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases?per_page=10'
           $headers = @{
             'User-Agent' = 'javm-release-workflow'
@@ -366,11 +380,15 @@ jobs:
             chmod +x $targetPath
           }
 
+          Write-Host "✅ N_m3u8DL-RE 就绪：$targetPath"
+          Write-Host "::endgroup::"
+
       - name: Download FFmpeg
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          Write-Host "::group::下载 FFmpeg sidecar（${{ matrix.platform }}-${{ matrix.arch }}）"
           $target = '${{ matrix.platform }}-${{ matrix.arch }}'
           $binDir = Join-Path $PWD 'src-tauri/bin'
           $downloadDir = Join-Path $env:RUNNER_TEMP 'ffmpeg-download'
@@ -414,7 +432,33 @@ jobs:
             chmod +x $targetPath
           }
 
-          Write-Host "FFmpeg installed: $targetPath"
+          Write-Host "✅ FFmpeg 就绪：$targetPath"
+          Write-Host "::endgroup::"
+
+      - name: Verify bundled sidecars
+        shell: pwsh
+        run: |
+          $binDir = Join-Path $PWD 'src-tauri/bin'
+          Write-Host "::group::校验 sidecar 二进制"
+          if (-not (Test-Path $binDir)) {
+            throw "未找到 sidecar 目录：$binDir"
+          }
+          $files = Get-ChildItem -Path $binDir -File
+          if (-not $files) {
+            throw "sidecar 目录为空：$binDir"
+          }
+          foreach ($f in $files) {
+            $sizeKb = [math]::Round($f.Length / 1KB, 1)
+            Write-Host ("  {0} ({1} KB)" -f $f.Name, $sizeKb)
+          }
+          if (-not ($files | Where-Object { $_.Name -like 'N_m3u8DL-RE*' })) {
+            throw '校验失败：bin 目录缺少 N_m3u8DL-RE。'
+          }
+          if (-not ($files | Where-Object { $_.Name -like 'ffmpeg*' })) {
+            throw '校验失败：bin 目录缺少 ffmpeg。'
+          }
+          Write-Host "✅ sidecar 校验通过，将被打包进 resources。"
+          Write-Host "::endgroup::"
 
       - name: Resolve bundle targets
         id: bundle_targets
@@ -431,13 +475,16 @@ jobs:
           }
 
           "targets=$targets" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "✅ 本次打包目标：$targets"
 
-      - name: Build and upload release assets
+      - name: Build Tauri app and upload assets
         uses: tauri-apps/tauri-action@action-v0.6.2
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # 失败时打印 Rust 调用栈，便于定位编译/打包错误
+          RUST_BACKTRACE: "1"
         with:
           releaseId: ${{ needs.prepare_release.outputs.release_id }}
           tagName: ${{ github.ref_name }}
@@ -448,10 +495,44 @@ jobs:
           tauriScript: bun tauri
           retryAttempts: 2
           includeUpdaterJson: true
+          # --verbose 输出 cargo/bundler 详细日志；前端由 beforeBuildCommand（bun run build）构建
           args: >-
             --config src-tauri/tauri.release.conf.json
             --target "${{ matrix.rust_target }}"
             --bundles "${{ steps.bundle_targets.outputs.targets }}"
+            --verbose
+
+      - name: Summarize release build
+        if: always()
+        shell: pwsh
+        run: |
+          $summary = $env:GITHUB_STEP_SUMMARY
+          $bundleDir = Join-Path $PWD "src-tauri/target/${{ matrix.rust_target }}/release/bundle"
+
+          "## 构建产物 - ${{ matrix.platform }}-${{ matrix.arch }} (${{ job.status }})" | Out-File -FilePath $summary -Append -Encoding utf8
+
+          if (-not (Test-Path $bundleDir)) {
+            "未找到打包目录：``$bundleDir``" | Out-File -FilePath $summary -Append -Encoding utf8
+            return
+          }
+
+          $exts = @('.exe', '.msi', '.dmg', '.deb', '.AppImage', '.sig', '.gz', '.zip')
+          $artifacts = Get-ChildItem -Path $bundleDir -Recurse -File |
+            Where-Object { $exts -contains $_.Extension } |
+            Sort-Object Name
+
+          if (-not $artifacts) {
+            "打包目录中未发现可发布产物。" | Out-File -FilePath $summary -Append -Encoding utf8
+            return
+          }
+
+          "| 文件 | 大小 (MB) |" | Out-File -FilePath $summary -Append -Encoding utf8
+          "| --- | ---: |" | Out-File -FilePath $summary -Append -Encoding utf8
+          foreach ($a in $artifacts) {
+            $sizeMb = [math]::Round($a.Length / 1MB, 2)
+            "| $($a.Name) | $sizeMb |" | Out-File -FilePath $summary -Append -Encoding utf8
+            Write-Host ("产物：{0} ({1} MB)" -f $a.Name, $sizeMb)
+          }
 
   publish-release:
     if: startsWith(github.ref, 'refs/tags/v') && needs.build-release.result == 'success'
