@@ -82,6 +82,9 @@ pub fn listen_cf_visibility(
     frontend_event_name: Option<&str>,
     // 遇到 CF 时是否弹出窗口让用户验证；关闭时即使检测到 CF 也保持隐藏
     show_on_cf: bool,
+    // CF 通过后窗口的隐藏方式：true=移到屏幕外但保持渲染（视频抓流需要持续渲染高清资源），
+    // false=直接 hide（搜索源刮削只读 HTML，隐藏即可）
+    offscreen_when_passed: bool,
 ) -> tauri::EventId {
     let window = (*window).clone();
     let app_handle = app.clone();
@@ -111,8 +114,12 @@ pub fn listen_cf_visibility(
                 .update_cf_state(window.label(), challenge_detected);
             match (previous_state, challenge_detected) {
                 (Some(true), false) => {
-                    // CF 验证通过后自动隐藏 WebView 窗口
-                    sync_window_visibility(&window, false);
+                    // CF 验证通过后：抓流窗口移到屏幕外保持渲染，其余直接隐藏
+                    if offscreen_when_passed {
+                        show_window_offscreen(&window);
+                    } else {
+                        sync_window_visibility(&window, false);
+                    }
                     emit_cf_state(
                         &app_handle,
                         frontend_event_name,
@@ -149,6 +156,28 @@ pub fn sync_window_visibility(window: &WebviewWindow, visible: bool) {
     } else {
         let _ = window.hide();
     }
+}
+
+/// 后台抓取窗口的真实视口尺寸（CSS 像素）。
+/// 视频站点常按窗口大小自适应加载不同分辨率，必须给足尺寸才能拿到高清流。
+pub const SCRAPER_VIEWPORT_WIDTH: f64 = 1920.0;
+pub const SCRAPER_VIEWPORT_HEIGHT: f64 = 1080.0;
+/// 离屏坐标：把窗口移出可视区域，依赖已禁用的原生遮挡检测（见 WEBVIEW_BROWSER_ARGS）
+/// 保持 WebView2 持续渲染，既不打扰用户又能正常执行页面 JS。
+pub const SCRAPER_OFFSCREEN_POS: f64 = -10000.0;
+
+/// 将抓取窗口恢复真实视口尺寸并移到屏幕外，保持 visible 以持续渲染。
+/// 幂等：多个监听器在同一 CF 通过事件上调用，最终状态一致，无竞态。
+pub fn show_window_offscreen(window: &WebviewWindow) {
+    let _ = window.set_size(tauri::LogicalSize::new(
+        SCRAPER_VIEWPORT_WIDTH,
+        SCRAPER_VIEWPORT_HEIGHT,
+    ));
+    let _ = window.set_position(tauri::LogicalPosition::new(
+        SCRAPER_OFFSCREEN_POS,
+        SCRAPER_OFFSCREEN_POS,
+    ));
+    let _ = window.show();
 }
 
 pub fn emit_cf_state(

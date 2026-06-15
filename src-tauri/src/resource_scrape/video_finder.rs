@@ -319,8 +319,8 @@ pub fn open_video_finder_webview(
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 
-    // 默认可见但使用极小尺寸（1×1），确保 WebView2 能正常渲染/执行 JS
-    // 同时不打扰用户；仅在遇到 CF 验证时自动放大并居中。
+    // 默认可见但用真实视口尺寸并移到屏幕外：既保证 WebView2 正常渲染/执行 JS、
+    // 让自适应站点加载高清资源，又不打扰用户；仅在遇到 CF 验证时自动放大并居中。
     let is_visible = true;
     let data_directory = webview_support::persistent_data_directory(app)?;
 
@@ -328,7 +328,14 @@ pub fn open_video_finder_webview(
     let builder =
         WebviewWindowBuilder::new(app, VIDEO_FINDER_LABEL, WebviewUrl::External(parsed_url.clone()))
             .title(format!("查找视频链接 - {}", code.to_uppercase()))
-            .inner_size(1.0, 1.0)
+            .inner_size(
+                webview_support::SCRAPER_VIEWPORT_WIDTH,
+                webview_support::SCRAPER_VIEWPORT_HEIGHT,
+            )
+            .position(
+                webview_support::SCRAPER_OFFSCREEN_POS,
+                webview_support::SCRAPER_OFFSCREEN_POS,
+            )
             .visible(is_visible)
             .user_agent(webview_support::WEBVIEW_USER_AGENT)
             .initialization_script(&anti_detection_js)
@@ -368,6 +375,8 @@ pub fn open_video_finder_webview(
         &cf_event_name,
         Some(VIDEO_FINDER_CF_STATE_EVENT),
         show_on_cf,
+        // CF 通过后移到屏幕外但保持渲染，确保继续抓取高清视频流
+        true,
     );
     let cf_probe_js = webview_support::build_cf_probe_script(&cf_event_name);
 
@@ -394,9 +403,9 @@ pub fn open_video_finder_webview(
             }
 
             if was_active && saw_cf_for_listener.swap(false, Ordering::Relaxed) {
-                // CF 验证通过后：缩小窗口并隐藏
-                let _ = window_for_listener.set_size(tauri::PhysicalSize::new(1u32, 1u32));
-                let _ = window_for_listener.hide();
+                // CF 验证通过后：恢复真实视口尺寸并移到屏幕外保持渲染，再导航回目标页恢复抓流。
+                // 与 listen_cf_visibility 调用同一幂等辅助函数，避免两个监听器竞态。
+                webview_support::show_window_offscreen(&window_for_listener);
                 if let Err(err) = window_for_listener.navigate(target_url_for_listener.clone()) {
                     log::error!(
                         "[video_finder] event=cf_reload_failed site={} error={}",
