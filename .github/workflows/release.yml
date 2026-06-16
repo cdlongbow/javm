@@ -128,6 +128,12 @@ jobs:
             Write-Host "清理资产时出现异常（可忽略）: $_"
           }
 
+          # 资产清理为尽力而为：个别 DELETE 返回 404/非 2xx 时 gh 会留下非零 $LASTEXITCODE，
+          # 而 GitHub 的 pwsh 包装器会以 exit $LASTEXITCODE 收尾、把它放大成步骤失败。
+          # 这里显式归零并以 0 收尾，避免清理失败阻断发布。
+          $global:LASTEXITCODE = 0
+          exit 0
+
   build-release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: prepare_release
@@ -578,4 +584,8 @@ jobs:
             exit 0
           }
 
-          gh api --method DELETE "repos/$repo/releases/$releaseId"
+          gh api --method DELETE "repos/$repo/releases/$releaseId" 2>$null
+          Write-Host "已清理草稿 release $releaseId（或其已不存在）。"
+          # DELETE 命中已不存在的 release 会返回 404，避免非零退出码使清理 job 变红
+          $global:LASTEXITCODE = 0
+          exit 0
