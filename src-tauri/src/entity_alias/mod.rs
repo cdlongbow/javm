@@ -10,29 +10,46 @@
 //! - **`entity_aliases` + `designation_entities`（投影/缓存）**：由证据 + 规则**推导**而来，可随时
 //!   [`rebuild`] 重算。清洗脏数据 = 删证据/源或加规则 → 重建，**合并因此可逆**。
 //!
+//! ## 模块划分
+//! - [`text`]：归一化 / 语言判断 / 书写体系排序（纯函数）
+//! - [`cluster`]：投影簇两张表的底层 SQL 原语
+//! - [`evidence`]：原始证据读写 + 实体证据反查
+//! - [`overrides`]：校正规则读写（block/merge/canonical）
+//! - 本文件：编排（[`apply_designation`] / [`rebuild`]）、读 API（[`resolve_entity`] / [`expand`]）
+//!
 //! ## 关联策略（保守，避免误并）
 //! - **片商**：每部影片唯一片商 → 同番号各源给的片商名永远可安全归并。
 //! - **女优**：仅当该番号是**单人作**（各源报告的女优数 ≤ 1）才归并，多人作不归并以免错并合演者。
 
 pub mod commands;
+mod cluster;
+mod evidence;
+mod overrides;
 mod seed;
-
-use std::collections::HashSet;
+mod text;
 
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
+use cluster::{
+    ensure_entity, entity_id_for_norm, remove_designation_entity, unify_names,
+    upsert_designation_entity,
+};
+use evidence::{all_designations, evidence_names, max_source_count};
+use overrides::{blocked_norms, merge_groups};
+use text::script_rank;
+
+// 对外公开 API（供 commands / database_writer / 搜索 / seed / lib 调用）
+pub use cluster::designation_entity;
+pub use evidence::{evidence_for_entity, purge_source, record_evidence, EvidenceRow};
+pub use overrides::{add_block, add_canonical, add_force_merge, apply_force_merge_group};
 pub use seed::import_seed_if_needed;
+pub use text::{detect_lang, normalize_name};
 
 /// 实体类型常量
 pub const ENTITY_ACTOR: &str = "actor";
 pub const ENTITY_STUDIO: &str = "studio";
 pub const ENTITY_TAG: &str = "tag";
-
-/// 校正规则 kind
-const KIND_MERGE: &str = "merge";
-const KIND_BLOCK: &str = "block";
-const KIND_CANONICAL: &str = "canonical";
 
 /// 一条别名记录（下发前端/供调用方使用）
 #[derive(Debug, Clone, Serialize)]
@@ -45,486 +62,7 @@ pub struct AliasRow {
     pub confidence: f64,
 }
 
-// ==================== 文本处理 ====================
-
-/// 归一化匹配键：全角→半角、小写、去除所有空白。
-pub fn normalize_name(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for ch in name.chars() {
-        let mapped = match ch {
-            '\u{3000}' => ' ',
-            '\u{FF01}'..='\u{FF5E}' => char::from_u32(ch as u32 - 0xFEE0).unwrap_or(ch),
-            _ => ch,
-        };
-        if mapped.is_whitespace() {
-            continue;
-        }
-        out.extend(mapped.to_lowercase());
-    }
-    out
-}
-
-/// 粗略语言判断（仅作 `lang` 字段提示，排序/canonical 用 [`script_rank`]）。
-pub fn detect_lang(name: &str) -> &'static str {
-    let mut has_kana = false;
-    let mut has_cjk = false;
-    let mut has_ascii_alpha = false;
-    for ch in name.chars() {
-        let u = ch as u32;
-        if (0x3040..=0x30FF).contains(&u) {
-            has_kana = true;
-        } else if (0x4E00..=0x9FFF).contains(&u) {
-            has_cjk = true;
-        } else if ch.is_ascii_alphabetic() {
-            has_ascii_alpha = true;
-        }
-    }
-    if has_kana {
-        "ja"
-    } else if has_cjk {
-        "zh"
-    } else if has_ascii_alpha {
-        "en"
-    } else {
-        "unknown"
-    }
-}
-
-/// 查询/canonical 偏好按**书写体系**排序（不靠不可靠的 ja/zh 判别）：
-/// 含假名→0；含汉字→1；纯 ASCII(罗马音)→2。源偏好的日文/汉字名自然排在前。
-fn script_rank(name: &str) -> u8 {
-    let mut has_kana = false;
-    let mut has_cjk = false;
-    for ch in name.chars() {
-        let u = ch as u32;
-        if (0x3040..=0x30FF).contains(&u) {
-            has_kana = true;
-        } else if (0x4E00..=0x9FFF).contains(&u) {
-            has_cjk = true;
-        }
-    }
-    if has_kana {
-        0
-    } else if has_cjk {
-        1
-    } else {
-        2
-    }
-}
-
-// ==================== 投影簇底层原语 ====================
-
-fn entity_id_for_norm(
-    conn: &Connection,
-    entity_type: &str,
-    name_norm: &str,
-) -> rusqlite::Result<Option<i64>> {
-    conn.query_row(
-        "SELECT entity_id FROM entity_aliases WHERE entity_type = ?1 AND name_norm = ?2",
-        params![entity_type, name_norm],
-        |row| row.get(0),
-    )
-    .map(Some)
-    .or_else(no_rows_to_none)
-}
-
-/// 查某番号绑定的实体 id（studio 必有；actor 仅单人作有）。供探索/演员模块按番号定位实体。
-pub fn designation_entity(
-    conn: &Connection,
-    designation: &str,
-    entity_type: &str,
-) -> rusqlite::Result<Option<i64>> {
-    conn.query_row(
-        "SELECT entity_id FROM designation_entities WHERE designation = ?1 AND entity_type = ?2",
-        params![designation, entity_type],
-        |row| row.get(0),
-    )
-    .map(Some)
-    .or_else(no_rows_to_none)
-}
-
-fn no_rows_to_none<T>(e: rusqlite::Error) -> rusqlite::Result<Option<T>> {
-    match e {
-        rusqlite::Error::QueryReturnedNoRows => Ok(None),
-        other => Err(other),
-    }
-}
-
-/// 新建实体：插入首条别名，entity_id 置为该行自增 id（全局唯一，免并发分配碰撞）。
-fn create_entity(
-    conn: &Connection,
-    entity_type: &str,
-    name: &str,
-    name_norm: &str,
-    source: &str,
-) -> rusqlite::Result<i64> {
-    conn.execute(
-        "INSERT INTO entity_aliases
-            (entity_type, entity_id, name, name_norm, lang, is_canonical, source, confidence)
-         VALUES (?1, 0, ?2, ?3, ?4, 1, ?5, 1.0)",
-        params![entity_type, name, name_norm, detect_lang(name), source],
-    )?;
-    let id = conn.last_insert_rowid();
-    conn.execute(
-        "UPDATE entity_aliases SET entity_id = ?1 WHERE id = ?1",
-        params![id],
-    )?;
-    Ok(id)
-}
-
-fn insert_alias(
-    conn: &Connection,
-    entity_type: &str,
-    entity_id: i64,
-    name: &str,
-    name_norm: &str,
-    source: &str,
-) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO entity_aliases
-            (entity_type, entity_id, name, name_norm, lang, is_canonical, source, confidence)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, 1.0)",
-        params![entity_type, entity_id, name, name_norm, detect_lang(name), source],
-    )?;
-    Ok(())
-}
-
-fn merge_entities(
-    conn: &Connection,
-    entity_type: &str,
-    keep: i64,
-    from: i64,
-) -> rusqlite::Result<()> {
-    if keep == from {
-        return Ok(());
-    }
-    conn.execute(
-        "UPDATE entity_aliases SET entity_id = ?1 WHERE entity_type = ?2 AND entity_id = ?3",
-        params![keep, entity_type, from],
-    )?;
-    conn.execute(
-        "UPDATE designation_entities SET entity_id = ?1 WHERE entity_type = ?2 AND entity_id = ?3",
-        params![keep, entity_type, from],
-    )?;
-    Ok(())
-}
-
-/// 重选 canonical：优先采用 `canonical` 校正规则锁定的名字；否则按 script_rank（假名>汉字>罗马音）。
-fn refresh_canonical(conn: &Connection, entity_type: &str, entity_id: i64) -> rusqlite::Result<()> {
-    let pinned = canonical_norms(conn, entity_type)?;
-    let mut stmt = conn.prepare(
-        "SELECT id, name, name_norm FROM entity_aliases WHERE entity_type = ?1 AND entity_id = ?2",
-    )?;
-    let rows = stmt
-        .query_map(params![entity_type, entity_id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    // 锁定优先：rank 0 给被 pin 的名字
-    let best = rows
-        .iter()
-        .min_by_key(|(id, name, norm)| {
-            let pin_rank = if pinned.contains(norm) { 0 } else { 1 };
-            (pin_rank, script_rank(name), *id)
-        })
-        .map(|(id, _, _)| *id);
-
-    conn.execute(
-        "UPDATE entity_aliases SET is_canonical = 0 WHERE entity_type = ?1 AND entity_id = ?2",
-        params![entity_type, entity_id],
-    )?;
-    if let Some(best_id) = best {
-        conn.execute(
-            "UPDATE entity_aliases SET is_canonical = 1 WHERE id = ?1",
-            params![best_id],
-        )?;
-    }
-    Ok(())
-}
-
-fn upsert_designation_entity(
-    conn: &Connection,
-    designation: &str,
-    entity_type: &str,
-    entity_id: i64,
-) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT INTO designation_entities (designation, entity_type, entity_id)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(designation, entity_type) DO UPDATE SET entity_id = excluded.entity_id",
-        params![designation, entity_type, entity_id],
-    )?;
-    Ok(())
-}
-
-fn remove_designation_entity(
-    conn: &Connection,
-    designation: &str,
-    entity_type: &str,
-) -> rusqlite::Result<()> {
-    conn.execute(
-        "DELETE FROM designation_entities WHERE designation = ?1 AND entity_type = ?2",
-        params![designation, entity_type],
-    )?;
-    Ok(())
-}
-
-/// 确保名字至少作为单实体存在（多人作的女优名：可被 resolve，但不归并、不绑番号）。
-fn ensure_entity(
-    conn: &Connection,
-    entity_type: &str,
-    name: &str,
-    name_norm: &str,
-    source: &str,
-) -> rusqlite::Result<i64> {
-    match entity_id_for_norm(conn, entity_type, name_norm)? {
-        Some(eid) => Ok(eid),
-        None => create_entity(conn, entity_type, name, name_norm, source),
-    }
-}
-
-/// 把一组名字归并到同一实体，返回 entity_id。空名跳过。
-fn unify_names(
-    conn: &Connection,
-    entity_type: &str,
-    names: &[&str],
-    source: &str,
-) -> rusqlite::Result<Option<i64>> {
-    let mut target: Option<i64> = None;
-    for name in names {
-        let trimmed = name.trim();
-        let norm = normalize_name(trimmed);
-        if norm.is_empty() {
-            continue;
-        }
-        let existing = entity_id_for_norm(conn, entity_type, &norm)?;
-        match (target, existing) {
-            (None, Some(e)) => target = Some(e),
-            (None, None) => target = Some(create_entity(conn, entity_type, trimmed, &norm, source)?),
-            (Some(t), None) => insert_alias(conn, entity_type, t, trimmed, &norm, source)?,
-            (Some(t), Some(e)) if e == t => {}
-            (Some(t), Some(e)) => merge_entities(conn, entity_type, t, e)?,
-        }
-    }
-    if let Some(t) = target {
-        refresh_canonical(conn, entity_type, t)?;
-    }
-    Ok(target)
-}
-
-// ==================== 证据 / 校正规则 ====================
-
-/// 追加一条原始证据（best-effort 的归一化空名跳过）。
-pub fn record_evidence(
-    conn: &Connection,
-    designation: &str,
-    entity_type: &str,
-    name: &str,
-    source: &str,
-) -> rusqlite::Result<()> {
-    let designation = designation.trim();
-    let trimmed = name.trim();
-    let norm = normalize_name(trimmed);
-    if designation.is_empty() || norm.is_empty() {
-        return Ok(());
-    }
-    conn.execute(
-        "INSERT OR IGNORE INTO alias_evidence
-            (designation, entity_type, name, name_norm, source)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![designation, entity_type, trimmed, norm, source],
-    )?;
-    Ok(())
-}
-
-fn blocked_norms(conn: &Connection, entity_type: &str) -> rusqlite::Result<HashSet<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT name_norm FROM alias_overrides WHERE entity_type = ?1 AND kind = ?2",
-    )?;
-    let set = stmt
-        .query_map(params![entity_type, KIND_BLOCK], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<HashSet<_>>>()?;
-    Ok(set)
-}
-
-fn canonical_norms(conn: &Connection, entity_type: &str) -> rusqlite::Result<HashSet<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT name_norm FROM alias_overrides WHERE entity_type = ?1 AND kind = ?2",
-    )?;
-    let set = stmt
-        .query_map(params![entity_type, KIND_CANONICAL], |row| {
-            row.get::<_, String>(0)
-        })?
-        .collect::<rusqlite::Result<HashSet<_>>>()?;
-    Ok(set)
-}
-
-/// 校正：拉黑一个名字（永不入簇）。返回后需 [`rebuild`] 使其对存量生效。
-pub fn add_block(conn: &Connection, entity_type: &str, name: &str) -> rusqlite::Result<()> {
-    let norm = normalize_name(name);
-    if norm.is_empty() {
-        return Ok(());
-    }
-    conn.execute(
-        "DELETE FROM alias_overrides WHERE kind = ?1 AND entity_type = ?2 AND name_norm = ?3",
-        params![KIND_BLOCK, entity_type, norm],
-    )?;
-    conn.execute(
-        "INSERT INTO alias_overrides (kind, entity_type, group_key, name, name_norm)
-         VALUES (?1, ?2, NULL, ?3, ?4)",
-        params![KIND_BLOCK, entity_type, name.trim(), norm],
-    )?;
-    Ok(())
-}
-
-/// 校正：锁定某名字为该实体展示名。
-pub fn add_canonical(conn: &Connection, entity_type: &str, name: &str) -> rusqlite::Result<()> {
-    let norm = normalize_name(name);
-    if norm.is_empty() {
-        return Ok(());
-    }
-    conn.execute(
-        "DELETE FROM alias_overrides WHERE kind = ?1 AND entity_type = ?2 AND name_norm = ?3",
-        params![KIND_CANONICAL, entity_type, norm],
-    )?;
-    conn.execute(
-        "INSERT INTO alias_overrides (kind, entity_type, group_key, name, name_norm)
-         VALUES (?1, ?2, NULL, ?3, ?4)",
-        params![KIND_CANONICAL, entity_type, name.trim(), norm],
-    )?;
-    Ok(())
-}
-
-/// 校正：强制把一组名字归并为同一实体（自动关联没认出的等价名时用）。
-pub fn add_force_merge(
-    conn: &Connection,
-    entity_type: &str,
-    names: &[String],
-) -> rusqlite::Result<()> {
-    let valid: Vec<&String> = names
-        .iter()
-        .filter(|n| !normalize_name(n).is_empty())
-        .collect();
-    if valid.len() < 2 {
-        return Ok(());
-    }
-    // group_key 用首名归一化值，稳定且便于去重
-    let group_key = format!("manual:{}", normalize_name(valid[0]));
-    for name in valid {
-        let norm = normalize_name(name);
-        conn.execute(
-            "INSERT INTO alias_overrides (kind, entity_type, group_key, name, name_norm)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![KIND_MERGE, entity_type, group_key, name.trim(), norm],
-        )?;
-    }
-    Ok(())
-}
-
-/// 立即把一组名字归并到投影簇（种子导入用，避免等到下次 rebuild 才生效）。
-pub fn apply_force_merge_group(
-    conn: &Connection,
-    entity_type: &str,
-    names: &[String],
-) -> rusqlite::Result<()> {
-    let blocked = blocked_norms(conn, entity_type)?;
-    let refs: Vec<&str> = names
-        .iter()
-        .filter(|n| !blocked.contains(&normalize_name(n)))
-        .map(|n| n.as_str())
-        .collect();
-    if !refs.is_empty() {
-        unify_names(conn, entity_type, &refs, "seed")?;
-    }
-    Ok(())
-}
-
-/// 读取所有 merge 规则组（用于 rebuild）。返回每组的 (name, name_norm) 列表。
-fn merge_groups(
-    conn: &Connection,
-    entity_type: &str,
-) -> rusqlite::Result<Vec<Vec<(String, String)>>> {
-    let mut stmt = conn.prepare(
-        "SELECT group_key, name, name_norm FROM alias_overrides
-         WHERE entity_type = ?1 AND kind = ?2 ORDER BY group_key, id",
-    )?;
-    let rows = stmt
-        .query_map(params![entity_type, KIND_MERGE], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    let mut groups: Vec<Vec<(String, String)>> = Vec::new();
-    let mut cur_key: Option<String> = None;
-    for (key, name, norm) in rows {
-        if cur_key.as_deref() != Some(key.as_str()) {
-            groups.push(Vec::new());
-            cur_key = Some(key);
-        }
-        groups.last_mut().unwrap().push((name, norm));
-    }
-    Ok(groups)
-}
-
 // ==================== 投影构建：实时关联 + 重建 ====================
-
-/// 取某番号某类型在证据中的去重名字（按 norm 去重，保留一个原名），并剔除被 block 的。
-fn evidence_names(
-    conn: &Connection,
-    designation: &str,
-    entity_type: &str,
-    blocked: &HashSet<String>,
-) -> rusqlite::Result<Vec<(String, String)>> {
-    let mut stmt = conn.prepare(
-        "SELECT name, name_norm FROM alias_evidence
-         WHERE designation = ?1 AND entity_type = ?2 GROUP BY name_norm",
-    )?;
-    let rows = stmt
-        .query_map(params![designation, entity_type], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows
-        .into_iter()
-        .filter(|(_, norm)| !blocked.contains(norm))
-        .collect())
-}
-
-/// 各源在该番号报告的（去 block 后）女优数的最大值，用于单人作判定。
-fn max_source_count(
-    conn: &Connection,
-    designation: &str,
-    entity_type: &str,
-    blocked: &HashSet<String>,
-) -> rusqlite::Result<usize> {
-    let mut stmt = conn.prepare(
-        "SELECT source, name_norm FROM alias_evidence
-         WHERE designation = ?1 AND entity_type = ?2",
-    )?;
-    let rows = stmt
-        .query_map(params![designation, entity_type], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    let mut per_source: std::collections::HashMap<String, HashSet<String>> = Default::default();
-    for (source, norm) in rows {
-        if blocked.contains(&norm) {
-            continue;
-        }
-        per_source.entry(source).or_default().insert(norm);
-    }
-    Ok(per_source.values().map(|set| set.len()).max().unwrap_or(0))
-}
 
 /// 把某番号的证据投影到簇（实时 + 重建共用）：片商总是归并；女优仅单人作归并。
 pub fn apply_designation(conn: &Connection, designation: &str) -> rusqlite::Result<()> {
@@ -592,27 +130,10 @@ pub fn rebuild(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
 
-    let designations: Vec<String> = {
-        let mut stmt = conn.prepare("SELECT DISTINCT designation FROM alias_evidence")?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
-    for designation in designations {
+    for designation in all_designations(conn)? {
         apply_designation(conn, &designation)?;
     }
     Ok(())
-}
-
-/// 删除某数据源贡献的全部证据（「某网站弄错了」时清洗它的脏数据）。返回删除行数。
-/// 调用方应随后 [`rebuild`]。
-pub fn purge_source(conn: &Connection, source: &str) -> rusqlite::Result<usize> {
-    let n = conn.execute(
-        "DELETE FROM alias_evidence WHERE source = ?1",
-        params![source],
-    )?;
-    Ok(n)
 }
 
 // ==================== 读 API ====================
@@ -662,54 +183,6 @@ pub fn expand(
             .then(a.name.cmp(&b.name))
     });
     Ok(rows)
-}
-
-/// 番号证据明细（供清洗 UI 查看某实体背后的来源，决定要清掉谁）。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EvidenceRow {
-    pub designation: String,
-    pub name: String,
-    pub source: String,
-}
-
-/// 列出某实体相关的全部原始证据（按其全部别名名字反查证据）。
-pub fn evidence_for_entity(
-    conn: &Connection,
-    entity_type: &str,
-    name: &str,
-) -> rusqlite::Result<Vec<EvidenceRow>> {
-    let Some(eid) = resolve_entity(conn, entity_type, name)? else {
-        return Ok(Vec::new());
-    };
-    // 该实体的全部归一名
-    let norms: Vec<String> = {
-        let mut stmt = conn.prepare(
-            "SELECT name_norm FROM entity_aliases WHERE entity_type = ?1 AND entity_id = ?2",
-        )?;
-        let rows = stmt
-            .query_map(params![entity_type, eid], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
-    let mut out = Vec::new();
-    let mut stmt = conn.prepare(
-        "SELECT designation, name, source FROM alias_evidence
-         WHERE entity_type = ?1 AND name_norm = ?2",
-    )?;
-    for norm in norms {
-        let rows = stmt
-            .query_map(params![entity_type, norm], |row| {
-                Ok(EvidenceRow {
-                    designation: row.get(0)?,
-                    name: row.get(1)?,
-                    source: row.get(2)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        out.extend(rows);
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -809,14 +282,9 @@ mod tests {
             resolve_entity(&conn, ENTITY_ACTOR, "三上悠亜").unwrap(),
             resolve_entity(&conn, ENTITY_ACTOR, "葵つかさ").unwrap()
         );
-        // 坏源在 CCC-3 把两人当成同一人的别名（单人作误报）→ 错误合并
-        scrape(&conn, "CCC-3", &[("bad", &[], &["三上悠亜"])]);
-        scrape(&conn, "CCC-3", &[("bad", &[], &["葵つかさ"])]);
-        // 注：bad 在 CCC-3 报了 2 个名 → 实为多人作判定，不会合并；构造真正的误并需单人作误报。
-        // 这里改为：bad 在两条不同番号把同一对名字分别绑定，制造跨簇 merge。
+        // 坏源在 DDD-4 把两人各报 1 人（单人作误报）→ 误并三上悠亜与葵つかさ
         scrape(&conn, "DDD-4", &[("bad", &[], &["三上悠亜"])]);
         scrape(&conn, "DDD-4", &[("bad2", &[], &["葵つかさ"])]);
-        // DDD-4 两源各报 1 人 → 单人作 → 误并三上悠亜与葵つかさ
         assert_eq!(
             resolve_entity(&conn, ENTITY_ACTOR, "三上悠亜").unwrap(),
             resolve_entity(&conn, ENTITY_ACTOR, "葵つかさ").unwrap(),
@@ -877,7 +345,7 @@ mod tests {
         record_evidence(&conn, "SSNI-1", ENTITY_ACTOR, "葵つかさ", "srcA").unwrap();
         // 重建：用全部证据判定为多人作 → 不应有番号→女优绑定
         rebuild(&conn).unwrap();
-        let bound: Option<i64> = designation_entity(&conn, "SSNI-1", ENTITY_ACTOR).unwrap();
+        let bound = designation_entity(&conn, "SSNI-1", ENTITY_ACTOR).unwrap();
         assert!(bound.is_none(), "重建后多人作不应绑定单一女优实体");
     }
 
