@@ -152,6 +152,98 @@ impl Database {
             [],
         )?;
 
+        // 跨语言别名表（覆盖 actor/studio/tag）：同一实体的多语言/多写法名归并到同一
+        // entity_id（按 entity_type 各自独立的合成簇 id）。name_norm 为归一化匹配键。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS entity_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                entity_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                name_norm TEXT NOT NULL,
+                lang TEXT NOT NULL DEFAULT 'unknown',
+                is_canonical INTEGER NOT NULL DEFAULT 0,
+                source TEXT,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(entity_type, name_norm)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_entity_aliases_entity
+             ON entity_aliases(entity_type, entity_id)",
+            [],
+        )?;
+
+        // 番号→实体 绑定：作为「同番号关联」跨源/跨时间的累积桥，
+        // studio 每片唯一、actor 仅单人作时绑定（多人作不绑定，避免误并合演者）。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS designation_entities (
+                designation TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id INTEGER NOT NULL,
+                PRIMARY KEY (designation, entity_type)
+            )",
+            [],
+        )?;
+
+        // 别名原始证据（append-only）：每条 = 某数据源在某番号给出的某名字。
+        // 别名簇(entity_aliases/designation_entities)是由它 + overrides 推导出的投影，可随时重建。
+        // 清洗脏数据 = 删掉对应证据/源 → rebuild，合并因此可逆。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS alias_evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                designation TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                name_norm TEXT NOT NULL,
+                source TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(designation, entity_type, name_norm, source)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_alias_evidence_lookup
+             ON alias_evidence(entity_type, designation)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_alias_evidence_source
+             ON alias_evidence(source)",
+            [],
+        )?;
+
+        // 人工/种子校正规则（rebuild 与实时关联都尊重，避免重刮覆盖修正）：
+        // kind='merge'：同 group_key 的名字强制归并；'block'：该名字永不入簇；'canonical'：锁定展示名。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS alias_overrides (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                group_key TEXT,
+                name TEXT NOT NULL,
+                name_norm TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_alias_overrides_lookup
+             ON alias_overrides(entity_type, kind)",
+            [],
+        )?;
+
+        // 通用 KV 元信息表（如别名种子导入版本），供幂等迁移/一次性导入使用。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )",
+            [],
+        )?;
+
         // 2. 视频主表
     log::info!("[db] event=create_videos_table_started");
 

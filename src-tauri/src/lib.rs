@@ -15,6 +15,7 @@ pub mod download;
 pub mod nfo;
 pub mod resource_scrape;
 pub mod scanner;
+pub mod entity_alias;
 pub mod utils;
 
 use tauri::{AppHandle, Manager};
@@ -180,6 +181,14 @@ pub fn run() {
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             db.check_and_reset_if_needed();
             db.init().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+            // 导入跨语言别名种子（幂等，仅版本落后时执行一次）
+            if let Ok(conn) = db.get_connection() {
+                if let Err(e) = entity_alias::import_seed_if_needed(&conn) {
+                    log::warn!("[entity_alias] event=seed_import_failed error={}", e);
+                }
+            }
+
             app.manage(db);
 
             // 注册深度链接处理器
@@ -362,6 +371,14 @@ pub fn run() {
             resource_scrape::commands::rs_get_video_sites,
             resource_scrape::commands::rs_analyze_hls,
             resource_scrape::commands::rs_check_video_exists_by_code,
+            // 跨语言别名
+            entity_alias::commands::entity_alias_expand,
+            entity_alias::commands::entity_alias_inspect,
+            entity_alias::commands::entity_alias_purge_source,
+            entity_alias::commands::entity_alias_rebuild,
+            entity_alias::commands::entity_alias_block,
+            entity_alias::commands::entity_alias_force_merge,
+            entity_alias::commands::entity_alias_pin_canonical,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

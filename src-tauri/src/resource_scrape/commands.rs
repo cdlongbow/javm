@@ -296,6 +296,67 @@ async fn proxy_preview_images_to_files(
 /// 参数：
 /// - `code`: 番号
 /// - `source`: 可选，指定单个数据源 ID（如 "javbus"），不传则搜索全部
+/// 单个数据源贡献的同番号关联证据（原始未翻译名 + 该源标识）
+#[derive(Clone)]
+struct SourceEvidence {
+    /// 数据源标识（如 "javbus"），用于证据归属与按源清洗
+    source: String,
+    /// 片商名（studio + maker，去空）
+    studios: Vec<String>,
+    /// 女优名（按该源拆分）
+    actors: Vec<String>,
+}
+
+/// 搜索完成后，把各源对同一番号给出的名字写入别名**原始证据**并投影（best-effort，不阻断搜索）。
+/// 记录全部名字（带真实源标识，便于按源清洗）；归并裁决统一交给 `apply_designation`：
+/// 片商总是归并，女优仅单人作归并，多人作不并。
+fn associate_search_evidence(
+    db_path: &std::path::Path,
+    designation: &str,
+    evidence: &[SourceEvidence],
+) {
+    use crate::entity_alias::{apply_designation, record_evidence, ENTITY_ACTOR, ENTITY_STUDIO};
+
+    let designation = designation.trim();
+    if designation.is_empty() || evidence.is_empty() {
+        return;
+    }
+
+    let mut conn = match rusqlite::Connection::open(db_path) {
+        Ok(conn) => conn,
+        Err(e) => {
+            log::warn!("[entity_alias] event=search_associate_open_failed error={}", e);
+            return;
+        }
+    };
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    let tx = match conn.transaction() {
+        Ok(tx) => tx,
+        Err(e) => {
+            log::warn!("[entity_alias] event=search_associate_tx_failed error={}", e);
+            return;
+        }
+    };
+
+    for ev in evidence {
+        for studio in &ev.studios {
+            let _ = record_evidence(&tx, designation, ENTITY_STUDIO, studio, &ev.source);
+        }
+        for actor in &ev.actors {
+            let _ = record_evidence(&tx, designation, ENTITY_ACTOR, actor, &ev.source);
+        }
+    }
+    let _ = apply_designation(&tx, designation);
+
+    if let Err(e) = tx.commit() {
+        log::warn!(
+            "[entity_alias] event=search_associate_commit_failed designation={} error={}",
+            designation,
+            e
+        );
+    }
+}
+
 #[tauri::command]
 pub async fn rs_search_resource(
     app: AppHandle,
@@ -380,6 +441,9 @@ pub async fn rs_search_resource(
         total
     );
 
+    // 同番号关联证据：各源成功解析后把原始（未翻译）片商/女优名汇入，搜索完成后统一归并别名
+    let alias_evidence = std::sync::Arc::new(std::sync::Mutex::new(Vec::<SourceEvidence>::new()));
+
     // 并发请求所有数据源（受 semaphore 限制）
     let mut handles = Vec::new();
     for source in search_sources {
@@ -389,6 +453,7 @@ pub async fn rs_search_resource(
         let app = app.clone();
         let token = token.clone();
         let semaphore = semaphore.clone();
+        let alias_evidence = alias_evidence.clone();
         let preferred_cover_type = preferred_cover_type.clone();
         let site = enabled_sites
             .iter()
@@ -544,6 +609,30 @@ pub async fn rs_search_resource(
                             page_url
                         );
 
+                        // 收集同番号关联证据（用原始未翻译名，翻译会污染语言归属）
+                        {
+                            let studios: Vec<String> = [result.studio.trim(), result.maker.trim()]
+                                .into_iter()
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_string())
+                                .collect();
+                            let actors: Vec<String> = result
+                                .actors
+                                .split(['、', ',', '，'])
+                                .map(|a| a.trim().to_string())
+                                .filter(|a| !a.is_empty())
+                                .collect();
+                            if !studios.is_empty() || !actors.is_empty() {
+                                if let Ok(mut guard) = alias_evidence.lock() {
+                                    guard.push(SourceEvidence {
+                                        source: name.clone(),
+                                        studios,
+                                        actors,
+                                    });
+                                }
+                            }
+                        }
+
                         // 如果开启了翻译，先翻译再 emit 给前端
                         let mut result_to_emit = match crate::utils::ai_translator::translate_search_result(&app, &result).await {
                             Ok(translated) => {
@@ -590,6 +679,22 @@ pub async fn rs_search_resource(
         log::info!("[scrape_search] event=search_cancelled code={}", code);
     } else {
         log::info!("[scrape_search] event=search_completed code={} source_count={}", code, total);
+
+        // 同番号关联：把各源给的片商/女优名累积为跨语言别名（后台执行，不阻断 search-done）
+        let collected = alias_evidence
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        if !collected.is_empty() {
+            let db_path = app
+                .state::<crate::db::Database>()
+                .get_database_path()
+                .clone();
+            let code_for_alias = code.clone();
+            tokio::task::spawn_blocking(move || {
+                associate_search_evidence(&db_path, &code_for_alias, &collected);
+            });
+        }
     }
     let _ = app.emit("search-done", ());
     Ok(())

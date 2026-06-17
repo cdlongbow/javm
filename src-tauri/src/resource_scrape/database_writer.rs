@@ -12,6 +12,34 @@ fn resolve_scraped_duration(existing_duration: Option<i32>, scraped_duration_min
     }
 }
 
+/// 把刮削结果的片商/女优名记入跨语言别名原始证据并投影（best-effort，失败不阻断保存）。
+/// 记录全部名字（含多人作的全部女优）；是否归并由 `apply_designation` 按证据统一裁决
+/// （片商总是归并，女优仅单人作归并）。
+fn record_designation_aliases(
+    conn: &rusqlite::Connection,
+    designation: &str,
+    studios: &[&str],
+    actors: &[String],
+) {
+    use crate::entity_alias::{apply_designation, record_evidence, ENTITY_ACTOR, ENTITY_STUDIO};
+    if designation.is_empty() {
+        return;
+    }
+    for studio in studios {
+        let _ = record_evidence(conn, designation, ENTITY_STUDIO, studio, "scrape");
+    }
+    for actor in actors {
+        let _ = record_evidence(conn, designation, ENTITY_ACTOR, actor, "scrape");
+    }
+    if let Err(e) = apply_designation(conn, designation) {
+        log::warn!(
+            "[entity_alias] event=apply_failed designation={} error={}",
+            designation,
+            e
+        );
+    }
+}
+
 /// 读取本地封面文件尺寸（仅读图头，开销小）。路径为空或读取失败时返回 (None, None)。
 fn read_cover_dimensions(path: &str) -> (Option<i32>, Option<i32>) {
     if path.trim().is_empty() {
@@ -252,6 +280,15 @@ impl DatabaseWriter {
                     Database::get_or_create_genre(&tx, genre_name).map_err(|e| e.to_string())?;
                 Database::add_video_genre(&tx, &video_id, genre_id).map_err(|e| e.to_string())?;
             }
+
+            // 5. 跨语言别名：同番号关联（片商每片唯一→总是；女优仅单人作才归并，避免误并合演者）。
+            //    best-effort：别名失败不应阻断刮削保存。
+            record_designation_aliases(
+                &tx,
+                metadata.local_id.trim(),
+                &[metadata.studio.as_str(), metadata.maker.as_str()],
+                &metadata.actors,
+            );
 
             tx.commit().map_err(|e| e.to_string())?;
             Ok(())
