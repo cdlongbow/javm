@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { Trash2, FolderOpen, Hash, Tag } from 'lucide-vue-next'
-import { useVideoStore } from '@/stores'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Checkbox } from '@/components/ui/checkbox'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   Dialog,
@@ -39,8 +39,6 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<Emits>()
 
-const videoStore = useVideoStore()
-
 const isOpen = computed({
   get: () => props.open,
   set: (value) => emit('update:open', value),
@@ -60,18 +58,77 @@ interface DuplicateGroup {
 const duplicateGroups = ref<DuplicateGroup[]>([])
 const loading = ref(false)
 
+// 待删除视频 id 集合（勾选 = 删除）
+const selectedIds = ref<Set<string>>(new Set())
+
 // 判断是否跨目录
 const checkCrossDir = (videos: Video[]): boolean => {
   const dirs = new Set(videos.map(v => v.dirPath || v.videoPath.replace(/[\\/][^\\/]+$/, '')))
   return dirs.size > 1
 }
 
+// 解析分辨率为可比较的像素数（越大画质越高）
+const parseResolutionScore = (res?: string): number => {
+  if (!res) return 0
+  const m = res.match(/(\d{2,5})\s*[x×]\s*(\d{2,5})/i)
+  if (m) return parseInt(m[1], 10) * parseInt(m[2], 10)
+  const lower = res.toLowerCase()
+  if (lower.includes('4k') || lower.includes('2160')) return 3840 * 2160
+  if (lower.includes('1440')) return 2560 * 1440
+  if (lower.includes('1080')) return 1920 * 1080
+  if (lower.includes('720')) return 1280 * 720
+  if (lower.includes('480')) return 854 * 480
+  const n = parseInt(lower, 10)
+  return Number.isNaN(n) ? 0 : n
+}
+
+// 文件名（去掉路径，含扩展名）
+const getFileName = (video: Video): string => video.videoPath.split(/[\\/]/).pop() || ''
+
+// "副本/拷贝"特征评分：越高越像派生副本（越应删除），用于画质完全相同时判断原始档
+const copyScore = (video: Video): number => {
+  const name = getFileName(video).toLowerCase()
+  let score = name.length // 文件名越长越像派生副本
+  if (/副本|拷贝|复制|\bcopy\b/.test(name)) score += 1000 // 显式复制标记
+  const m = name.match(/\((\d+)\)\s*\.[^.]+$/) // 末尾 " (N)" 序号，序号越大越靠后产生
+  if (m) score += 100 + parseInt(m[1], 10)
+  return score
+}
+
+// 按"保留优先级"排序，最优（保留）在前：时长完整度 > 分辨率 > 体积 > 原始文件名
+const sortByKeepPriority = (videos: Video[]): Video[] => {
+  const maxDuration = Math.max(0, ...videos.map(v => v.duration || 0))
+  // 每个视频映射为固定的排序元组，保证排序传递性
+  const rankOf = (v: Video): number[] => [
+    // 完整度：时长明显偏短（< 本组最长的 90%）的视为样片/截断，优先删除
+    maxDuration > 0 && (v.duration || 0) >= maxDuration * 0.9 ? 1 : 0,
+    parseResolutionScore(v.resolution), // 分辨率高优先保留
+    v.fileSize || 0,                    // 体积大（码率高）优先保留
+    -copyScore(v),                      // 原始文件名优先（副本/序号靠后）
+  ]
+  return [...videos].sort((a, b) => {
+    const ra = rankOf(a)
+    const rb = rankOf(b)
+    for (let i = 0; i < ra.length; i++) {
+      if (rb[i] !== ra[i]) return rb[i] - ra[i] // 降序：最优在前
+    }
+    return 0
+  })
+}
+
+// 切换单个视频的勾选
+const toggleSelect = (id: string, checked: boolean | 'indeterminate') => {
+  if (checked) selectedIds.value.add(id)
+  else selectedIds.value.delete(id)
+}
+
 // 查找重复视频
 const findDuplicates = async () => {
   loading.value = true
+  selectedIds.value = new Set()
   try {
     const videos = await getDuplicateVideos()
-    
+
     const n = videos.length
     if (n === 0) {
       duplicateGroups.value = []
@@ -163,11 +220,16 @@ const findDuplicates = async () => {
         key = groupVideos[0].videoPath.split(/[\\/]/).pop() || '未知视频'
       }
 
+      // 按保留优先级排序：最优（保留）在前，其余为待删除的重复项
+      const sorted = sortByKeepPriority(groupVideos)
+      // 智能勾选：保留排在第一的最优项，自动勾选其余重复项待删除
+      sorted.slice(1).forEach(v => selectedIds.value.add(v.id))
+
       duplicates.push({
         key,
         type,
         isCrossDir,
-        videos: groupVideos.sort((a, b) => (b.fileSize || 0) - (a.fileSize || 0)),
+        videos: sorted,
       })
     })
 
@@ -198,19 +260,27 @@ const handleOpenDirectory = async (video: Video) => {
 
 // 删除视频
 const videoToDelete = ref<Video | null>(null)
+const videoIdsToDelete = ref<string[]>([])
 const showDeleteDialog = ref(false)
 
 const handleDeleteVideo = (video: Video) => {
   videoToDelete.value = video
+  videoIdsToDelete.value = []
+  showDeleteDialog.value = true
+}
+
+// 批量删除已勾选视频
+const handleBatchDelete = () => {
+  if (selectedIds.value.size === 0) return
+  videoToDelete.value = null
+  videoIdsToDelete.value = [...selectedIds.value]
   showDeleteDialog.value = true
 }
 
 const handleDeleteSuccess = async () => {
-  if (!videoToDelete.value) return
-  const videoId = videoToDelete.value.id
   videoToDelete.value = null
+  videoIdsToDelete.value = []
   await findDuplicates()
-  videoStore.removeVideo(videoId)
 }
 
 // 格式化文件大小
@@ -337,16 +407,26 @@ watch(() => props.open, (newVal) => {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead class="w-[55%]">文件信息</TableHead>
-                  <TableHead class="w-[45%] text-right pr-8">操作</TableHead>
+                  <TableHead class="w-[44px] text-center">删除</TableHead>
+                  <TableHead class="w-[52%]">文件信息</TableHead>
+                  <TableHead class="text-right pr-8">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 <TableRow v-for="video in group.videos" :key="video.id">
+                  <TableCell class="text-center align-middle">
+                    <Checkbox
+                      :model-value="selectedIds.has(video.id)"
+                      @update:model-value="(v) => toggleSelect(video.id, v)"
+                    />
+                  </TableCell>
                   <TableCell>
                     <div class="flex flex-col gap-1.5 max-w-[450px]">
-                      <div class="font-medium text-sm truncate" :title="getVideoLabel(video)">
-                        {{ getVideoLabel(video) }}
+                      <div class="font-medium text-sm truncate flex items-center gap-2" :title="getVideoLabel(video)">
+                        <span class="truncate">{{ getVideoLabel(video) }}</span>
+                        <Badge v-if="!selectedIds.has(video.id)" variant="outline" class="h-5 px-1.5 text-[10px] font-normal shrink-0">
+                          保留
+                        </Badge>
                       </div>
                       <div class="text-xs text-muted-foreground font-mono truncate opacity-80" :title="video.videoPath">
                         {{ video.videoPath }}
@@ -390,6 +470,25 @@ watch(() => props.open, (newVal) => {
           </div>
         </div>
       </ScrollArea>
+
+      <!-- 批量删除栏 -->
+      <div
+        v-if="!loading && duplicateGroups.length > 0"
+        class="flex items-center justify-between border-t pt-3"
+      >
+        <span class="text-sm text-muted-foreground">
+          已勾选 {{ selectedIds.size }} 个待删除视频
+        </span>
+        <Button
+          variant="destructive"
+          size="sm"
+          :disabled="selectedIds.size === 0"
+          @click="handleBatchDelete"
+        >
+          <Trash2 class="mr-1.5 size-4" />
+          删除勾选
+        </Button>
+      </div>
     </DialogContent>
   </Dialog>
 
@@ -397,6 +496,7 @@ watch(() => props.open, (newVal) => {
   <DeleteVideoDialog
     v-model:open="showDeleteDialog"
     :video="videoToDelete"
+    :video-ids="videoIdsToDelete"
     @success="handleDeleteSuccess"
   />
 </template>

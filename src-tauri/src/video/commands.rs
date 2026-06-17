@@ -263,7 +263,8 @@ pub async fn get_duplicate_videos(db: State<'_, crate::db::Database>) -> AppResu
                 v.resolution,
                 v.file_size,
                 v.fast_hash,
-                v.scan_status
+                v.scan_status,
+                v.duration
             FROM videos v
             WHERE (v.fast_hash IS NOT NULL AND v.fast_hash != '' AND v.fast_hash IN (
                 SELECT fast_hash FROM videos WHERE fast_hash IS NOT NULL AND fast_hash != '' GROUP BY fast_hash HAVING COUNT(*) > 1
@@ -287,6 +288,7 @@ pub async fn get_duplicate_videos(db: State<'_, crate::db::Database>) -> AppResu
                     "fileSize": row.get::<_, Option<i64>>(6)?,
                     "fastHash": row.get::<_, Option<String>>(7)?,
                     "scanStatus": row.get::<_, i32>(8)?,
+                    "duration": row.get::<_, Option<i32>>(9)?,
                 }))
             })?;
 
