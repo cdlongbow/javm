@@ -266,6 +266,7 @@ export const useVideoStore = defineStore('video', () => {
                 if (
                     previousVideo.poster !== nextVideo.poster ||
                     previousVideo.thumb !== nextVideo.thumb ||
+                    previousVideo.fanart !== nextVideo.fanart ||
                     previousVideo.scanStatus !== nextVideo.scanStatus
                 ) {
                     bumpCoverVersion(nextVideo.id)

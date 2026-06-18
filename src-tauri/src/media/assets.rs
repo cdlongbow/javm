@@ -30,6 +30,216 @@ pub struct RelocatedVideoAssets {
 }
 
 // ============================================================
+// 元数据存储模式（跟随视频 / 独立目录）
+// ============================================================
+
+/// 元数据存储配置，从 `AppSettings.metadata` 派生
+#[derive(Debug, Clone)]
+pub struct MetadataStorageConfig {
+    /// 是否启用独立目录模式
+    pub independent: bool,
+    /// 独立目录模式下的元数据根目录
+    pub root_dir: String,
+}
+
+impl MetadataStorageConfig {
+    pub fn from_settings(settings: &crate::settings::AppSettings) -> Self {
+        Self {
+            independent: settings.metadata.is_independent(),
+            root_dir: settings.metadata.root_dir.trim().to_string(),
+        }
+    }
+}
+
+/// 独立目录模式下需写入的 .strm 规格
+#[derive(Debug, Clone)]
+pub struct StrmSpec {
+    /// .strm 文件路径
+    pub path: PathBuf,
+    /// 单行内容：视频真实绝对路径
+    pub video_abs_path: String,
+}
+
+/// 元数据资产落地目标：NFO / 图片 / extrafanart 写到哪里、用什么文件名 stem
+#[derive(Debug, Clone)]
+pub struct MediaAssetTarget {
+    /// NFO / poster / fanart / extrafanart 的落地目录
+    pub dir: PathBuf,
+    /// 文件名 stem（NFO = `<stem>.nfo`，封面 = `<stem>-poster.jpg`）
+    pub stem: String,
+    /// 独立目录模式下需写入的 .strm（跟随视频模式为 None）
+    pub strm: Option<StrmSpec>,
+}
+
+/// 清洗为合法路径片段：替换 Windows 非法字符、折叠空白、截断长度、去尾部点/空格。
+/// 与 `sanitize_title_for_path` 不同：永不返回错误，空串回退到 `fallback`。
+fn sanitize_path_component(raw: &str, fallback: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    let folded = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    // 截断到安全长度（按字符），避免 Windows 路径过长
+    let truncated: String = folded.chars().take(100).collect();
+    let trimmed = truncated.trim().trim_end_matches(['.', ' ']).to_string();
+    if trimmed.is_empty() {
+        fallback.trim().trim_end_matches(['.', ' ']).to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// 构造独立目录名：`番号 标题`（标题为空时退化为纯番号）
+fn build_independent_folder_name(local_id: &str, title: &str) -> String {
+    let id = local_id.trim();
+    let title = title.trim();
+    let raw = if title.is_empty() {
+        id.to_string()
+    } else {
+        format!("{} {}", id, title)
+    };
+    sanitize_path_component(&raw, id)
+}
+
+/// 解析元数据资产落地目标。
+///
+/// - 跟随视频模式：目录 = 视频父目录，stem = 视频文件名，无 .strm。
+/// - 独立目录模式（开启 + 根目录非空 + 番号非空）：目录 = `<root>/<番号 标题>/`，
+///   stem = 番号，并附带指向视频真实路径的 .strm。条件不满足时自动回退到跟随视频。
+pub fn resolve_asset_target(
+    video_path: &str,
+    local_id: &str,
+    title: &str,
+    cfg: &MetadataStorageConfig,
+) -> Result<MediaAssetTarget, String> {
+    let video = Path::new(video_path);
+    let video_parent = video.parent().ok_or("无效的视频路径")?;
+    let video_stem = video
+        .file_stem()
+        .ok_or("无效的视频文件名")?
+        .to_string_lossy()
+        .to_string();
+
+    let local_id = local_id.trim();
+
+    if cfg.independent && !cfg.root_dir.is_empty() && !local_id.is_empty() {
+        let folder = build_independent_folder_name(local_id, title);
+        let dir = Path::new(&cfg.root_dir).join(folder);
+        let stem = sanitize_path_component(local_id, &video_stem);
+        let strm = StrmSpec {
+            path: dir.join(format!("{}.strm", stem)),
+            video_abs_path: video_path.to_string(),
+        };
+        Ok(MediaAssetTarget {
+            dir,
+            stem,
+            strm: Some(strm),
+        })
+    } else {
+        Ok(MediaAssetTarget {
+            dir: video_parent.to_path_buf(),
+            stem: video_stem,
+            strm: None,
+        })
+    }
+}
+
+/// 确保目标目录存在；独立目录模式下写入（或更新）.strm（内容为视频真实绝对路径，幂等）。
+pub fn ensure_asset_dir_and_strm(target: &MediaAssetTarget) -> Result<(), String> {
+    fs::create_dir_all(&target.dir)
+        .map_err(|e| format!("创建元数据目录失败 {}: {}", target.dir.display(), e))?;
+
+    if let Some(strm) = &target.strm {
+        let want = strm.video_abs_path.trim();
+        let need_write = match fs::read_to_string(&strm.path) {
+            Ok(existing) => existing.trim() != want,
+            Err(_) => true,
+        };
+        if need_write {
+            fs::write(&strm.path, want)
+                .map_err(|e| format!("写入 .strm 文件失败 {}: {}", strm.path.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
+/// 在元数据根目录下定位某番号现有的独立子目录（含 `<番号>.strm`）。
+///
+/// 子目录名为「番号 标题」可能随标题变化，故按番号前缀筛选、再以 `<番号>.strm` 存在性确认。
+/// 返回 `(子目录路径, 文件名 stem)`；非独立模式 / 未配置 / 未找到时返回 None。
+fn find_independent_dir(cfg: &MetadataStorageConfig, local_id: &str) -> Option<(PathBuf, String)> {
+    if !cfg.independent {
+        return None;
+    }
+    let root = cfg.root_dir.trim();
+    let local_id = local_id.trim();
+    if root.is_empty() || local_id.is_empty() {
+        return None;
+    }
+
+    let stem = sanitize_path_component(local_id, local_id);
+    let strm_name = format!("{}.strm", stem);
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        if !entry.file_name().to_string_lossy().starts_with(&stem) {
+            continue;
+        }
+        let dir = entry.path();
+        if dir.join(&strm_name).exists() {
+            return Some((dir, stem));
+        }
+    }
+    None
+}
+
+/// 视频移动/重命名后，同步独立目录里对应番号子目录的 `.strm` 内容为新的视频绝对路径。
+/// 非独立模式 / 未找到 `.strm` 时静默跳过（不视为错误）。
+pub fn sync_independent_strm(
+    cfg: &MetadataStorageConfig,
+    local_id: &str,
+    new_video_path: &str,
+) -> Result<(), String> {
+    let Some((dir, stem)) = find_independent_dir(cfg, local_id) else {
+        return Ok(());
+    };
+    let strm_path = dir.join(format!("{}.strm", stem));
+    let want = new_video_path.trim();
+    let need_write = match fs::read_to_string(&strm_path) {
+        Ok(existing) => existing.trim() != want,
+        Err(_) => true,
+    };
+    if need_write {
+        fs::write(&strm_path, want)
+            .map_err(|e| format!("更新 .strm 文件失败 {}: {}", strm_path.display(), e))?;
+    }
+    Ok(())
+}
+
+/// 独立目录模式下，把更新后的 NFO 写回视频对应的独立元数据目录（按番号定位现有子目录、
+/// 引用该目录内已有图集的本地文件名）。
+///
+/// 返回 `Ok(true)` = 已写入独立目录；`Ok(false)` = 非独立模式或未找到独立目录（调用方应回退写视频同级）。
+pub fn save_nfo_to_independent_dir(
+    cfg: &MetadataStorageConfig,
+    local_id: &str,
+    metadata: &ScrapeMetadata,
+) -> Result<bool, String> {
+    let Some((dir, stem)) = find_independent_dir(cfg, local_id) else {
+        return Ok(false);
+    };
+    save_nfo_to(&dir, &stem, metadata)?;
+    Ok(true)
+}
+
+// ============================================================
 // NFO 元数据
 // ============================================================
 
@@ -38,23 +248,41 @@ pub struct RelocatedVideoAssets {
 /// 供 queue_manager、commands 等模块复用，避免重复实现。
 pub fn save_nfo_for_video(video_path: &str, metadata: &ScrapeMetadata) -> Result<(), String> {
     let path = Path::new(video_path);
-    let generator = NfoGenerator::new();
-
     let parent_dir = path.parent().ok_or("无效的视频路径")?;
     let file_stem = path
         .file_stem()
         .ok_or("无效的视频文件名")?
-        .to_string_lossy();
+        .to_string_lossy()
+        .to_string();
 
-    let poster_filename = format!("{}-poster.jpg", file_stem);
-    let poster_path = parent_dir.join(&poster_filename);
-    let local_poster = if poster_path.exists() {
-        Some(poster_filename.as_str())
-    } else {
-        None
-    };
+    save_nfo_to(parent_dir, &file_stem, metadata)
+}
 
-    generator.save(metadata, path, local_poster).map(|_| ())
+/// 将 NFO 保存到指定目录，文件名为 `<stem>.nfo`；按同目录已存在的标准图集文件
+/// （`<stem>-poster/fanart/thumb.*`）引用相对文件名。
+///
+/// 供独立目录模式直接写入 `<root>/<番号 标题>/<番号>.nfo`。
+pub fn save_nfo_to(dir: &Path, stem: &str, metadata: &ScrapeMetadata) -> Result<(), String> {
+    let generator = NfoGenerator::new();
+    let artwork = detect_local_artwork(dir, stem);
+    let nfo_path = dir.join(format!("{}.nfo", stem));
+    generator.save_to(metadata, &nfo_path, &artwork).map(|_| ())
+}
+
+/// 探测同目录已存在的标准图集文件，返回 NFO 引用的相对文件名（poster/fanart/thumb）。
+pub fn detect_local_artwork(dir: &Path, stem: &str) -> crate::nfo::generator::NfoArtwork {
+    crate::nfo::generator::NfoArtwork {
+        poster: detect_artwork_filename(dir, stem, crate::media::artwork::POSTER_SUFFIX),
+        fanart: detect_artwork_filename(dir, stem, crate::media::artwork::FANART_SUFFIX),
+        thumb: detect_artwork_filename(dir, stem, crate::media::artwork::THUMB_SUFFIX),
+    }
+}
+
+fn detect_artwork_filename(dir: &Path, stem: &str, suffix: &str) -> Option<String> {
+    ["jpg", "jpeg", "png", "webp"]
+        .iter()
+        .map(|ext| format!("{}-{}.{}", stem, suffix, ext))
+        .find(|name| dir.join(name).exists())
 }
 
 pub fn has_same_named_parent_dir(video_path: &Path) -> bool {
@@ -155,9 +383,11 @@ fn move_dir(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 fn resolve_asset_source(video_path: &Path, explicit_path: Option<&str>, suffix: &str) -> Option<PathBuf> {
+    // 仅接受与视频同级的图：独立元数据目录里的图不随视频移动/重命名搬走，留在独立目录。
+    let video_parent = video_path.parent();
     explicit_path
         .map(PathBuf::from)
-        .filter(|path| path.exists() && path.is_file())
+        .filter(|path| path.exists() && path.is_file() && path.parent() == video_parent)
         .or_else(|| find_sibling_artwork(video_path, suffix).map(PathBuf::from))
 }
 
@@ -577,15 +807,19 @@ pub fn rename_video_assets_with_title(
         original_video_path: video_path.to_string(),
         video_path: new_video_path.to_string_lossy().to_string(),
         dir_path: target_dir.to_string_lossy().to_string(),
+        // 未随视频搬动的图（如独立目录里的图）保留其原路径，避免被写库清空
         poster: poster_target
             .or(poster_source)
-            .map(|path| path.to_string_lossy().to_string()),
+            .map(|path| path.to_string_lossy().to_string())
+            .or_else(|| poster.map(|p| p.to_string())),
         thumb: thumb_target
             .or(thumb_source)
-            .map(|path| path.to_string_lossy().to_string()),
+            .map(|path| path.to_string_lossy().to_string())
+            .or_else(|| thumb.map(|p| p.to_string())),
         fanart: fanart_target
             .or(fanart_source)
-            .map(|path| path.to_string_lossy().to_string()),
+            .map(|path| path.to_string_lossy().to_string())
+            .or_else(|| fanart.map(|p| p.to_string())),
     }))
 }
 
@@ -675,9 +909,14 @@ pub fn ensure_video_in_named_parent_dir(
     }))
 }
 
+/// 在指定资产目录下定位 extrafanart 子目录
+pub fn extrafanart_dir_in(asset_dir: &Path) -> PathBuf {
+    asset_dir.join(EXTRAFANART_DIR_NAME)
+}
+
 pub fn extrafanart_dir_for_video(video_path: &Path) -> Result<PathBuf, String> {
     let parent_dir = video_path.parent().ok_or("无效的视频路径")?;
-    Ok(parent_dir.join(EXTRAFANART_DIR_NAME))
+    Ok(extrafanart_dir_in(parent_dir))
 }
 
 pub fn find_sibling_artwork(video_path: &Path, suffix: &str) -> Option<String> {
@@ -744,12 +983,22 @@ pub async fn sync_extrafanart_from_urls(
     video_path: &str,
     images: Vec<(usize, String)>,
 ) -> Result<Vec<String>, String> {
+    let video_parent = Path::new(video_path).parent().ok_or("无效的视频路径")?;
+    sync_extrafanart_to_dir(video_parent, images).await
+}
+
+/// 下载预览图到 `<asset_dir>/extrafanart/`，文件名 `fanart{N}.jpg`，有界并发。
+///
+/// 供独立目录模式将预览图写入 `<root>/<番号 标题>/extrafanart/`。
+pub async fn sync_extrafanart_to_dir(
+    asset_dir: &Path,
+    images: Vec<(usize, String)>,
+) -> Result<Vec<String>, String> {
     if images.is_empty() {
         return Ok(Vec::new());
     }
 
-    let video_path = Path::new(video_path);
-    let extrafanart_dir = extrafanart_dir_for_video(video_path)?;
+    let extrafanart_dir = extrafanart_dir_in(asset_dir);
     fs::create_dir_all(&extrafanart_dir).map_err(|e| format!("创建 extrafanart 目录失败: {}", e))?;
 
     let client = std::sync::Arc::new(crate::resource_scrape::fingerprint_client::shared_client()?);
@@ -812,24 +1061,25 @@ pub async fn sync_extrafanart_from_urls(
 pub fn save_frame_as_cover_assets(
     video_path: &str,
     frame_path: &str,
-) -> Result<String, String> {
+) -> Result<crate::media::artwork::ArtworkResult, String> {
     let video_path_obj = Path::new(video_path);
     let parent_dir = video_path_obj.parent().ok_or("无效的视频路径")?;
     let file_stem = video_path_obj
         .file_stem()
         .ok_or("无效的文件名")?
-        .to_string_lossy();
+        .to_string_lossy()
+        .to_string();
 
-    let poster_filename = format!("{}-poster.jpg", file_stem);
-    let poster_path = parent_dir.join(&poster_filename);
-
-    fs::copy(frame_path, &poster_path).map_err(|e| format!("保存 poster 失败: {}", e))?;
-
-    Ok(poster_path.to_string_lossy().to_string())
-}
-
-pub fn save_frame_as_cover(video_path: &str, frame_path: &str) -> Result<String, String> {
-    save_frame_as_cover_assets(video_path, frame_path)
+    // 截帧为横版 → fanart + thumb，并右裁出竖版 poster，产出标准图集
+    let artwork = crate::media::artwork::produce_artwork_from_local_image(
+        parent_dir,
+        &file_stem,
+        Path::new(frame_path),
+    );
+    if artwork.fanart.is_none() && artwork.poster.is_none() {
+        return Err("保存封面失败".to_string());
+    }
+    Ok(artwork)
 }
 
 /// 将截取的多个视频帧保存到 extrafanart 目录
@@ -1036,5 +1286,111 @@ mod tests {
         assert!(!nonexistent_nfo.exists());
         assert!(!nonexistent_cover.exists());
         assert!(!nonexistent_thumbs.exists());
+    }
+
+    #[test]
+    fn resolve_asset_target_follow_video_mode() {
+        let cfg = MetadataStorageConfig { independent: false, root_dir: String::new() };
+        let target = resolve_asset_target("/videos/ABC-123.mp4", "ABC-123", "标题", &cfg).unwrap();
+        assert_eq!(target.dir, Path::new("/videos"));
+        assert_eq!(target.stem, "ABC-123");
+        assert!(target.strm.is_none());
+    }
+
+    #[test]
+    fn resolve_asset_target_independent_mode() {
+        let cfg = MetadataStorageConfig { independent: true, root_dir: "/meta".to_string() };
+        let target = resolve_asset_target("/videos/raw_name.mp4", "ABC-123", "标题 X", &cfg).unwrap();
+        assert_eq!(target.dir, Path::new("/meta").join("ABC-123 标题 X"));
+        assert_eq!(target.stem, "ABC-123");
+        let strm = target.strm.expect("独立模式应生成 .strm");
+        assert_eq!(strm.path, Path::new("/meta").join("ABC-123 标题 X").join("ABC-123.strm"));
+        assert_eq!(strm.video_abs_path, "/videos/raw_name.mp4");
+    }
+
+    #[test]
+    fn resolve_asset_target_independent_falls_back_without_root_or_id() {
+        // 根目录为空 → 回退跟随视频
+        let cfg_no_root = MetadataStorageConfig { independent: true, root_dir: String::new() };
+        let t1 = resolve_asset_target("/videos/ABC-123.mp4", "ABC-123", "标题", &cfg_no_root).unwrap();
+        assert!(t1.strm.is_none());
+        assert_eq!(t1.dir, Path::new("/videos"));
+
+        // 番号为空 → 回退跟随视频
+        let cfg = MetadataStorageConfig { independent: true, root_dir: "/meta".to_string() };
+        let t2 = resolve_asset_target("/videos/ABC-123.mp4", "  ", "标题", &cfg).unwrap();
+        assert!(t2.strm.is_none());
+        assert_eq!(t2.stem, "ABC-123");
+    }
+
+    #[test]
+    fn build_independent_folder_name_handles_empty_title() {
+        assert_eq!(build_independent_folder_name("ABC-123", ""), "ABC-123");
+        assert_eq!(build_independent_folder_name("ABC-123", "  "), "ABC-123");
+        assert_eq!(build_independent_folder_name("ABC-123", "Hello"), "ABC-123 Hello");
+    }
+
+    #[test]
+    fn sanitize_path_component_replaces_illegal_chars_and_folds_space() {
+        assert_eq!(sanitize_path_component("a/b:c*d?", "fallback"), "a_b_c_d_");
+        assert_eq!(sanitize_path_component("   ", "fallback"), "fallback");
+        assert_eq!(sanitize_path_component("a   b", "fb"), "a b");
+    }
+
+    #[test]
+    fn sync_independent_strm_rewrites_matching_strm() {
+        let root = std::env::temp_dir().join(format!("javm-strm-test-{}", std::process::id()));
+        let sub = root.join("ABC-123 标题文字");
+        fs::create_dir_all(&sub).unwrap();
+        let strm = sub.join("ABC-123.strm");
+        fs::write(&strm, "D:\\old\\ABC-123.mp4").unwrap();
+
+        let cfg = MetadataStorageConfig {
+            independent: true,
+            root_dir: root.to_string_lossy().to_string(),
+        };
+        sync_independent_strm(&cfg, "ABC-123", "E:\\new\\ABC-123.mp4").unwrap();
+        assert_eq!(fs::read_to_string(&strm).unwrap().trim(), "E:\\new\\ABC-123.mp4");
+
+        // 非独立模式：跳过，不改动
+        let cfg_off = MetadataStorageConfig {
+            independent: false,
+            root_dir: root.to_string_lossy().to_string(),
+        };
+        sync_independent_strm(&cfg_off, "ABC-123", "X").unwrap();
+        assert_eq!(fs::read_to_string(&strm).unwrap().trim(), "E:\\new\\ABC-123.mp4");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn save_nfo_to_independent_dir_writes_into_located_dir() {
+        let root = std::env::temp_dir().join(format!("javm-indnfo-test-{}", std::process::id()));
+        let sub = root.join("ABC-123 标题");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("ABC-123.strm"), "D:\\v\\ABC-123.mp4").unwrap();
+
+        let cfg = MetadataStorageConfig {
+            independent: true,
+            root_dir: root.to_string_lossy().to_string(),
+        };
+        let meta = ScrapeMetadata {
+            local_id: "ABC-123".to_string(),
+            title: "标题".to_string(),
+            ..Default::default()
+        };
+
+        // 独立目录存在 → 写入 <番号>.nfo 并返回 true
+        assert!(save_nfo_to_independent_dir(&cfg, "ABC-123", &meta).unwrap());
+        assert!(sub.join("ABC-123.nfo").exists());
+
+        // 非独立模式 → 返回 false，不写
+        let cfg_off = MetadataStorageConfig {
+            independent: false,
+            root_dir: root.to_string_lossy().to_string(),
+        };
+        assert!(!save_nfo_to_independent_dir(&cfg_off, "ABC-123", &meta).unwrap());
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

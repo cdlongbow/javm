@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { toImageSrc } from '@/utils/image'
+import { toImageSrc, resolveCoverImage } from '@/utils/image'
 import { openImagePreview, isFancyboxOpen } from '@/composables/useImagePreview'
 import { usePreviewGallery } from '@/composables/usePreviewGallery'
 import {
@@ -171,7 +171,15 @@ const imageSrc = computed(() => {
         return src ? `${src}${src.includes('?') ? '&' : '?'}t=${_bust}` : ''
     }
 
-    const persistedCoverPath = formData.value.poster || props.video?.poster || formData.value.thumb || props.video?.thumb
+    // 按封面方向偏好选图（横屏→fanart，竖屏→poster，带回退）
+    const persistedCoverPath = resolveCoverImage(
+        {
+            poster: formData.value.poster || props.video?.poster,
+            thumb: formData.value.thumb || props.video?.thumb,
+            fanart: formData.value.fanart || props.video?.fanart,
+        },
+        settingsStore.settings.general.coverType,
+    )
     if (persistedCoverPath) {
         const path = persistedCoverPath
         const src = toImageSrc(path) ?? ''

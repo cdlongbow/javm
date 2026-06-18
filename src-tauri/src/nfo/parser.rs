@@ -96,6 +96,7 @@ pub fn parse_nfo(nfo_path: &Path, duration: &mut Option<i32>) -> Option<NfoData>
     let mut current_tag: Option<String> = None;
     let mut in_actor = false;
     let mut in_set = false;
+    let mut in_fanart = false;
     let mut current_thumb_aspect: Option<String> = None;
 
     loop {
@@ -109,6 +110,11 @@ pub fn parse_nfo(nfo_path: &Path, duration: &mut Option<i32>) -> Option<NfoData>
                     }
                     "set" => {
                         in_set = true;
+                        current_tag = None;
+                    }
+                    "fanart" => {
+                        // <fanart><thumb>…</thumb></fanart> 是横版背景图，内部 thumb 不计入预览
+                        in_fanart = true;
                         current_tag = None;
                     }
                     "thumb" => {
@@ -222,11 +228,16 @@ pub fn parse_nfo(nfo_path: &Path, duration: &mut Option<i32>) -> Option<NfoData>
                             remote_cover_url = Some(text);
                         }
                         "thumb" => {
-                            if current_thumb_aspect.as_deref() == Some("poster") {
+                            if in_fanart {
+                                // <fanart> 内的横版背景图，非预览
+                            } else if current_thumb_aspect.as_deref() == Some("poster") {
                                 if remote_cover_url.is_none() {
                                     remote_cover_url = Some(text);
                                 }
+                            } else if current_thumb_aspect.is_some() {
+                                // 其它 aspect（landscape 等）是图集引用，非预览
                             } else {
+                                // 无 aspect 的顶层 <thumb> 才是预览图
                                 thumb_urls.push(text);
                             }
                         }
@@ -253,6 +264,9 @@ pub fn parse_nfo(nfo_path: &Path, duration: &mut Option<i32>) -> Option<NfoData>
                 }
                 if tag == "set" {
                     in_set = false;
+                }
+                if tag == "fanart" {
+                    in_fanart = false;
                 }
                 if tag == "thumb" {
                     current_thumb_aspect = None;
@@ -355,6 +369,27 @@ mod tests {
         let _ = parse_nfo(&path, &mut duration);
 
         assert_eq!(duration, Some(7_200));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_nfo_should_not_treat_local_artwork_as_preview_thumbs() {
+        // 标准图集块（本地相对文件名）不应被当成预览图；仅顶层无 aspect 的 <thumb> 是预览
+        let nfo = "<movie>\
+            <poster>ABC-123-poster.jpg</poster>\
+            <thumb aspect=\"poster\">ABC-123-poster.jpg</thumb>\
+            <fanart><thumb>ABC-123-fanart.jpg</thumb></fanart>\
+            <thumb aspect=\"landscape\">ABC-123-thumb.jpg</thumb>\
+            <thumb>https://example.com/preview1.jpg</thumb>\
+            </movie>";
+        let path = write_temp_nfo(nfo);
+        let mut duration = None;
+        let data = parse_nfo(&path, &mut duration).unwrap();
+
+        assert_eq!(
+            data.thumb_urls,
+            vec!["https://example.com/preview1.jpg".to_string()]
+        );
         let _ = std::fs::remove_file(path);
     }
 }

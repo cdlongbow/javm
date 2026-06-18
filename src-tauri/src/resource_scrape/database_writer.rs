@@ -106,7 +106,9 @@ impl DatabaseWriter {
                 premiered: Some(metadata.premiered.as_str()),
                 duration: new_duration,
                 rating: metadata.score,
-                poster: &local_cover_image,
+                poster: Some(local_cover_image.as_str()),
+                thumb: None,
+                fanart: None,
                 local_id: Some(metadata.local_id.as_str()),
                 cover_width,
                 cover_height,
@@ -227,7 +229,7 @@ impl DatabaseWriter {
         &self,
         video_id: String,
         metadata: ScrapeMetadata,
-        local_cover_image: String,
+        artwork: crate::media::artwork::ArtworkResult,
     ) -> Result<(), String> {
         let db_path = self.db_path.clone();
 
@@ -242,8 +244,9 @@ impl DatabaseWriter {
             let existing_duration: Option<i32> =
                 Database::get_video_duration(&tx, &video_id).map_err(|e| e.to_string())?;
             let new_duration = resolve_scraped_duration(existing_duration, metadata.duration);
-            // 读取本地封面尺寸（仅读图头，开销小），写入库用于瀑布流等高画廊布局/虚拟化
-            let (cover_width, cover_height) = read_cover_dimensions(&local_cover_image);
+            // 封面尺寸取横版（默认展示）代表图，写入库用于瀑布流等高画廊布局/虚拟化
+            let (cover_width, cover_height) =
+                read_cover_dimensions(artwork.primary_dimension_path().unwrap_or_default());
             let update = crate::db::VideoScrapeUpdateData {
                 title: &metadata.title,
                 original_title: metadata.original_title.as_deref(),
@@ -252,7 +255,9 @@ impl DatabaseWriter {
                 premiered: Some(metadata.premiered.as_str()),
                 duration: new_duration,
                 rating: metadata.score,
-                poster: &local_cover_image,
+                poster: artwork.poster.as_deref(),
+                thumb: artwork.thumb.as_deref(),
+                fanart: artwork.fanart.as_deref(),
                 local_id: Some(metadata.local_id.as_str()),
                 cover_width,
                 cover_height,

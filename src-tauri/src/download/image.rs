@@ -40,44 +40,31 @@ pub async fn download_image(
     Ok(save_path.to_string_lossy().to_string())
 }
 
-/// 下载封面图片并保存到视频所在目录
+/// 将图片 URL 保存到指定文件路径（落点完全由调用方决定）。
 ///
-/// 文件命名规则：`{视频文件名}-poster.jpg`
+/// 支持三种来源：
+/// - `data:image/...;base64,...` — 解码 base64 写入
+/// - `http(s)://...` — HTTP 下载
+/// - 本地文件路径 — 直接复制（搜索阶段代理缓存的结果）
 ///
-/// 支持三种 URL 格式：
-/// - `data:image/...;base64,...` — 直接解码 base64 写入文件
-/// - `http(s)://...` — 通过 HTTP 下载
-/// - 本地文件路径 — 直接复制文件（搜索阶段代理缓存的结果）
-pub async fn download_cover(
-    video_path: &str,
-    cover_url: &str,
+/// 空 URL 返回空串（视为无图，非错误）。
+pub async fn save_image_url_to(
+    url: &str,
+    save_path: &Path,
     client: Option<&HttpClient>,
 ) -> Result<String, String> {
-    if cover_url.trim().is_empty() {
+    let url = url.trim();
+    if url.is_empty() {
         return Ok(String::new());
     }
 
-    if video_path.trim().is_empty() {
-        return Err("视频路径不能为空".to_string());
-    }
-
-    let video_path = Path::new(video_path);
-    let parent_dir = video_path.parent().ok_or("无效的视频路径")?;
-    let file_stem = video_path
-        .file_stem()
-        .ok_or("无效的文件名")?
-        .to_string_lossy();
-
-    let cover_filename = format!("{}-poster.jpg", file_stem);
-    let cover_path = parent_dir.join(&cover_filename);
-
     // 处理 data URL（base64 编码的图片数据）
-    if cover_url.starts_with("data:") {
-        return save_data_url_to_file(cover_url, &cover_path);
+    if url.starts_with("data:") {
+        return save_data_url_to_file(url, save_path);
     }
 
     // 处理 HTTP URL
-    if cover_url.starts_with("http://") || cover_url.starts_with("https://") {
+    if url.starts_with("http://") || url.starts_with("https://") {
         let owned_client;
         let client = match client {
             Some(c) => c,
@@ -86,18 +73,18 @@ pub async fn download_cover(
                 &owned_client
             }
         };
-        return download_image(client, cover_url, &cover_path).await;
+        return download_image(client, url, save_path).await;
     }
 
     // 处理本地缓存文件路径（搜索阶段代理下载的临时文件）
-    let source_path = Path::new(cover_url);
+    let source_path = Path::new(url);
     if source_path.exists() {
-        std::fs::copy(source_path, &cover_path)
-            .map_err(|e| format!("复制封面缓存文件失败: {}", e))?;
-        return Ok(cover_path.to_string_lossy().to_string());
+        std::fs::copy(source_path, save_path)
+            .map_err(|e| format!("复制图片缓存文件失败: {}", e))?;
+        return Ok(save_path.to_string_lossy().to_string());
     }
 
-    Err(format!("无法识别的封面 URL 格式: {}", &cover_url[..cover_url.len().min(100)]))
+    Err(format!("无法识别的图片 URL 格式: {}", &url[..url.len().min(100)]))
 }
 
 /// 将 data URL（base64）解码并保存为文件
@@ -205,17 +192,26 @@ mod tests {
     use std::path::PathBuf;
 
     #[tokio::test]
-    async fn test_download_cover_empty_url() {
-        let result = download_cover("/test/video.mp4", "", None).await;
+    async fn test_save_image_url_to_empty_url() {
+        let dir = std::env::temp_dir();
+        let result = save_image_url_to("", &dir.join("none.jpg"), None).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn test_download_cover_empty_path() {
-        let result = download_cover("", "http://example.com/cover.jpg", None).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("视频路径不能为空"));
+    async fn test_save_image_url_to_local_copy() {
+        let dir = std::env::temp_dir();
+        let src = dir.join(format!("javm-img-src-{}.bin", std::process::id()));
+        std::fs::write(&src, b"fake image bytes").unwrap();
+        let dst = dir.join(format!("javm-img-dst-{}.jpg", std::process::id()));
+
+        let result = save_image_url_to(&src.to_string_lossy(), &dst, None).await;
+        assert!(result.is_ok());
+        assert!(dst.exists());
+
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&dst);
     }
 
     #[tokio::test]
@@ -224,14 +220,6 @@ mod tests {
         let result = download_images_batch(&[], &dir, "thumb", None, None).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_cover_filename_generation() {
-        let video_path = Path::new("/path/to/ABC-123.mp4");
-        let file_stem = video_path.file_stem().unwrap().to_string_lossy();
-        let cover_filename = format!("{}-poster.jpg", file_stem);
-        assert_eq!(cover_filename, "ABC-123-poster.jpg");
     }
 
     #[test]

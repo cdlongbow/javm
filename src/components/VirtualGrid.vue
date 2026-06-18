@@ -9,6 +9,7 @@ import type { ViewMode } from '@/types/settings'
 import { openWithPlayer, openVideoPlayerWindow } from '@/lib/tauri'
 import { useSettingsStore } from '@/stores/settings'
 import { COVER_LAYOUTS, WATERFALL_ROW_HEIGHT, WATERFALL_NO_COVER_WIDTH } from '@/utils/constants'
+import { hasCoverImage, galleryCoverRatio } from '@/utils/image'
 import { Button } from '@/components/ui/button'
 
 interface Props {
@@ -64,15 +65,13 @@ const waterfallRowHeight = WATERFALL_ROW_HEIGHT + 60 + WATERFALL_GAP
 
 // 单张封面在画廊中的宽度（= 固定高度 × 封面宽高比；无封面用窄占位，缺尺寸用设置默认比例）
 const itemGalleryWidth = (video: Video): number => {
-  const hasCover = !!(video.poster || video.thumb)
-  if (!hasCover) return WATERFALL_NO_COVER_WIDTH
-  let ratio: number
-  if (video.coverWidth && video.coverHeight && video.coverHeight > 0) {
-    ratio = video.coverWidth / video.coverHeight
-  } else {
-    // 缺尺寸（未回填）回退到当前封面类型的默认比例（宽/高）
-    ratio = 1 / coverLayout.value.coverAspectRatio
-  }
+  if (!hasCoverImage(video)) return WATERFALL_NO_COVER_WIDTH
+  // 尺寸方向与封面类型一致时用真实比例，否则回退布局默认比例
+  const ratio = galleryCoverRatio(
+    video,
+    settingsStore.settings.general.coverType,
+    1 / coverLayout.value.coverAspectRatio,
+  )
   return Math.round(WATERFALL_ROW_HEIGHT * ratio)
 }
 

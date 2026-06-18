@@ -115,18 +115,29 @@ pub async fn save_captured_cover(
                     video_path.clone()
                 });
 
-        // 保存帧作为封面资源（仅 poster）
-        let poster_path =
+        // 截帧产出标准图集（横版 fanart + thumb，并右裁出竖版 poster）
+        let artwork =
             super::assets::save_frame_as_cover_assets(&actual_video_path, &frame_path)
                 .map_err(AppError::Business)?;
 
         // 更新数据库
         let conn = db.get_connection()?;
 
-        crate::db::Database::update_video_cover_paths(&conn, &video_id, &poster_path, None)?;
+        crate::db::Database::update_video_cover_paths(
+            &conn,
+            &video_id,
+            artwork.poster.as_deref(),
+            artwork.thumb.as_deref(),
+            artwork.fanart.as_deref(),
+        )?;
 
+        // 返回代表封面路径供前端刷新（横版优先）
+        let cover = artwork
+            .primary_dimension_path()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         Ok(SaveCapturedCoverResult {
-            thumb_path: poster_path,
+            thumb_path: cover,
             video_path: actual_video_path,
         })
     })

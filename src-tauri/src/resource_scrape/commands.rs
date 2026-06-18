@@ -1299,6 +1299,7 @@ pub fn search_result_to_metadata(sr: &SearchResult) -> ScrapeMetadata {
             .remote_thumb_urls
             .clone()
             .unwrap_or_else(|| sr.thumbs.clone()),
+        website: sr.page_url.clone(),
     }
 }
 
@@ -1322,6 +1323,8 @@ fn parse_duration_minutes(duration: &str) -> Option<i64> {
 pub(crate) struct PreparedScrapeVideo {
     pub video_path: String,
     pub poster: Option<String>,
+    pub thumb: Option<String>,
+    pub fanart: Option<String>,
 }
 
 pub(crate) fn prepare_video_for_scrape_save(
@@ -1428,6 +1431,8 @@ pub(crate) fn prepare_video_for_scrape_save_with_target_title(
             return Ok(PreparedScrapeVideo {
                 video_path: relocated.video_path,
                 poster: relocated.poster,
+                thumb: relocated.thumb,
+                fanart: relocated.fanart,
             });
         }
     }
@@ -1463,12 +1468,16 @@ pub(crate) fn prepare_video_for_scrape_save_with_target_title(
         return Ok(PreparedScrapeVideo {
             video_path: relocated.video_path,
             poster: relocated.poster,
+            thumb: relocated.thumb,
+            fanart: relocated.fanart,
         });
     }
 
     Ok(PreparedScrapeVideo {
         video_path,
         poster,
+        thumb,
+        fanart,
     })
 }
 
@@ -1530,30 +1539,70 @@ pub async fn rs_scrape_save(
         errors: vec![],
     };
 
-    // 步骤 1: 下载封面（失败不中断）
-    let local_cover_path = if !metadata.cover_url.is_empty() {
-        log::info!(
-            "[scrape_save] event=cover_download_started video_id={} path={} cover_url_type={}",
-            video_id,
-            video_path,
-            cover_url_type
-        );
-        match crate::download::image::download_cover(&video_path, &metadata.cover_url, None).await {
-            Ok(path) => {
-                result.cover_saved = true;
-                log::info!("[scrape_save] event=cover_download_succeeded video_id={} path={}", video_id, path);
-                path
-            }
-            Err(e) => {
-                let msg = format!("封面下载失败: {}", e);
-                log::error!("[scrape_save] event=cover_download_failed video_id={} path={} error={}", video_id, video_path, e);
-                result.errors.push(msg);
-                prepared_video.poster.clone().unwrap_or_default()
-            }
+    // 解析元数据落地目标：独立目录模式定向到 <root>/<番号 标题>/ 并写 .strm；
+    // 跟随视频模式 / 解析失败时回退为原有「视频同目录」逻辑。
+    let settings = crate::settings::get_settings(app.clone()).await.unwrap_or_default();
+    let storage_cfg = crate::media::assets::MetadataStorageConfig::from_settings(&settings);
+    let asset_target = crate::media::assets::resolve_asset_target(
+        &video_path,
+        &scrape_meta.local_id,
+        &scrape_meta.title,
+        &storage_cfg,
+    )
+    .map_err(|e| {
+        log::error!("[scrape_save] event=resolve_asset_target_failed video_id={} error={}", video_id, e)
+    })
+    .ok();
+    if let Some(target) = asset_target.as_ref() {
+        if let Err(e) = crate::media::assets::ensure_asset_dir_and_strm(target) {
+            log::error!("[scrape_save] event=metadata_dir_prepare_failed video_id={} error={}", video_id, e);
+            result.errors.push(format!("元数据目录/.strm 准备失败: {}", e));
         }
+    }
+
+    // 图集落地目录与文件名 stem（独立目录 / 跟随视频）
+    let (art_dir, art_stem) = match asset_target.as_ref() {
+        Some(target) => (target.dir.clone(), target.stem.clone()),
+        None => {
+            let p = std::path::Path::new(&video_path);
+            (
+                p.parent().map(|x| x.to_path_buf()).unwrap_or_default(),
+                p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+            )
+        }
+    };
+
+    // 步骤 1: 产出标准图集 poster(竖)/fanart(横)/thumb(横)（失败不中断）
+    log::info!(
+        "[scrape_save] event=artwork_started video_id={} path={} cover_url_type={}",
+        video_id, video_path, cover_url_type
+    );
+    let produced = crate::media::artwork::produce_artwork(
+        &art_dir,
+        &art_stem,
+        &scrape_meta.cover_url,
+        &scrape_meta.poster_url,
+        None,
+    )
+    .await;
+    result.cover_saved = produced.fanart.is_some() || produced.poster.is_some();
+    if result.cover_saved {
+        log::info!(
+            "[scrape_save] event=artwork_produced video_id={} poster={} fanart={} thumb={}",
+            video_id, produced.poster.is_some(), produced.fanart.is_some(), produced.thumb.is_some()
+        );
     } else {
-        log::info!("[scrape_save] event=cover_download_skipped video_id={} reason=empty_cover_url", video_id);
-        prepared_video.poster.clone().unwrap_or_default()
+        log::info!("[scrape_save] event=artwork_skipped video_id={} reason=no_cover", video_id);
+    }
+    // 失败/无封面时保留已有图集（poster/thumb/fanart），避免清空数据库封面
+    let artwork = if result.cover_saved {
+        produced
+    } else {
+        crate::media::artwork::ArtworkResult {
+            poster: prepared_video.poster.clone(),
+            thumb: prepared_video.thumb.clone(),
+            fanart: prepared_video.fanart.clone(),
+        }
     };
 
     // 步骤 2: 下载预览图到 extrafanart（失败不中断）
@@ -1565,44 +1614,30 @@ pub async fn rs_scrape_save(
             .map(|(index, url)| (index + 1, url.clone()))
             .collect();
 
-        if let Err(e) = crate::media::assets::sync_extrafanart_from_urls(
-            &video_path,
-            preview_items,
-        )
-        .await
-        {
+        if let Err(e) = crate::media::assets::sync_extrafanart_to_dir(&art_dir, preview_items).await {
             let msg = format!("预览图下载失败: {}", e);
             log::error!("[scrape_save] event=extrafanart_sync_failed video_id={} path={} error={}", video_id, video_path, e);
             result.errors.push(msg);
         }
     }
 
-    // 步骤 3: 生成 NFO（失败不中断）
-    {
-        match crate::media::assets::save_nfo_for_video(&video_path, &scrape_meta) {
-            Ok(_) => {
-                result.nfo_saved = true;
-                log::info!("[scrape_save] event=nfo_saved video_id={} path={}", video_id, video_path);
-            }
-            Err(e) => {
-                let msg = format!("NFO 生成失败: {}", e);
-                log::error!("[scrape_save] event=nfo_save_failed video_id={} path={} error={}", video_id, video_path, e);
-                result.errors.push(msg);
-            }
+    // 步骤 3: 生成 NFO（按已落地图集引用本地文件名，失败不中断）
+    match crate::media::assets::save_nfo_to(&art_dir, &art_stem, &scrape_meta) {
+        Ok(_) => {
+            result.nfo_saved = true;
+            log::info!("[scrape_save] event=nfo_saved video_id={} path={}", video_id, video_path);
+        }
+        Err(e) => {
+            let msg = format!("NFO 生成失败: {}", e);
+            log::error!("[scrape_save] event=nfo_save_failed video_id={} path={} error={}", video_id, video_path, e);
+            result.errors.push(msg);
         }
     }
 
-    // 步骤 3: 更新数据库（失败不中断）
+    // 步骤 4: 更新数据库（失败不中断）
     {
         let writer = super::database_writer::DatabaseWriter::new(&db);
-        match writer
-            .write_all(
-                video_id.clone(),
-                scrape_meta,
-                local_cover_path,
-            )
-            .await
-        {
+        match writer.write_all(video_id.clone(), scrape_meta, artwork).await {
             Ok(_) => {
                 result.db_updated = true;
                 log::info!("[scrape_save] event=db_updated video_id={} path={}", video_id, video_path);

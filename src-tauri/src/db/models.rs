@@ -121,6 +121,12 @@ pub struct ExistingVideoScanInfo {
     pub poster_mtime: Option<i64>,
     pub thumb_mtime: Option<i64>,
     pub fanart_mtime: Option<i64>,
+    /// 库内已记录的封面路径（可能位于独立元数据目录，非视频同级）
+    pub poster: Option<String>,
+    pub thumb: Option<String>,
+    pub fanart: Option<String>,
+    /// 已记录的扫描状态（2=已刮削），用于扫描时不回退独立目录模式已刮削项
+    pub scan_status: i32,
 }
 
 pub struct VideoScrapeUpdateData<'a> {
@@ -131,7 +137,9 @@ pub struct VideoScrapeUpdateData<'a> {
     pub premiered: Option<&'a str>,
     pub duration: Option<i32>,
     pub rating: Option<f64>,
-    pub poster: &'a str,
+    pub poster: Option<&'a str>,
+    pub thumb: Option<&'a str>,
+    pub fanart: Option<&'a str>,
     pub local_id: Option<&'a str>,
     pub cover_width: Option<i32>,
     pub cover_height: Option<i32>,

@@ -248,4 +248,7 @@ pub struct ScrapeMetadata {
     #[serde(default, deserialize_with = "deserialize_null_as_empty_vec")]
     pub thumbs: Vec<String>,
 
+    /// 详情页链接（写入 NFO 的 <website>，对齐标准 JAV NFO）
+    #[serde(default, deserialize_with = "deserialize_null_as_empty_string")]
+    pub website: String,
 }

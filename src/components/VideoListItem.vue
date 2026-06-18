@@ -7,7 +7,7 @@ import { SCAN_STATUS_TEXT, SCAN_STATUS_VARIANT } from '@/utils/constants'
 import { formatDuration, formatRating, formatFileSize } from '@/utils/format'
 import { useVideoStore } from '@/stores'
 import { useSettingsStore } from '@/stores/settings'
-import { toImageSrc } from '@/utils/image'
+import { toImageSrc, resolveCoverImage } from '@/utils/image'
 import {
   openInExplorer,
   moveVideoFile,
@@ -44,6 +44,8 @@ const showDeleteDialog = ref(false)
 const coverStateKey = computed(() => [
   props.video.poster || '',
   props.video.thumb || '',
+  props.video.fanart || '',
+  settingsStore.settings.general.coverType,
   props.video.scanStatus,
   videoStore.coverVersions[props.video.id] || 0,
 ].join('|'))
@@ -52,10 +54,10 @@ watch(coverStateKey, () => {
   imgError.value = false
 }, { immediate: true })
 
-// 图片源
+// 图片源（按封面方向偏好选图：横屏→fanart，竖屏→poster，带回退）
 const imageSrc = computed(() => {
   if (imgError.value) return null
-  const path = props.video.poster || props.video.thumb
+  const path = resolveCoverImage(props.video, settingsStore.settings.general.coverType)
   const src = toImageSrc(path)
   if (!src) return null
   const version = videoStore.coverVersions[props.video.id]

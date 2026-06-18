@@ -359,7 +359,30 @@ impl ScannerService {
         let poster_mtime = poster.as_deref().and_then(path_mtime_from_str);
         let thumb_mtime = thumb.as_deref().and_then(path_mtime_from_str);
         let fanart_mtime = fanart.as_deref().and_then(path_mtime_from_str);
-        let (cover_width, cover_height) = read_cover_dimensions(poster.as_deref());
+        // 封面尺寸取横版（默认展示）代表图，回退竖版
+        let (cover_width, cover_height) =
+            read_cover_dimensions(fanart.as_deref().or(thumb.as_deref()).or(poster.as_deref()));
+
+        // 封面优先沿用库内已记录且仍存在的路径，再回退视频同级文件。
+        // 跟随视频模式下二者本就是同一路径；独立目录模式下「库内记录」即独立目录里的图，
+        // 优先它可避免被同级截帧图(刮削前扫描遗留)反向覆盖。仅保留仍存在的文件。
+        let preserved_poster = existing
+            .as_ref()
+            .and_then(|e| e.poster.clone())
+            .filter(|p| cover_path_exists(p))
+            .or_else(|| poster.clone());
+        let preserved_thumb = existing
+            .as_ref()
+            .and_then(|e| e.thumb.clone())
+            .filter(|p| cover_path_exists(p))
+            .or_else(|| thumb.clone());
+        let preserved_fanart = existing
+            .as_ref()
+            .and_then(|e| e.fanart.clone())
+            .filter(|p| cover_path_exists(p))
+            .or_else(|| fanart.clone());
+        let has_any_cover =
+            preserved_poster.is_some() || preserved_thumb.is_some() || preserved_fanart.is_some();
 
         // 解析 NFO 文件
         let nfo_path = file_path.with_extension("nfo");
@@ -379,8 +402,8 @@ impl ScannerService {
 
             if unchanged {
                 existing_paths.remove(&path_str);
-                // 即使文件本身没变，如果仍然没有封面也派发截帧任务
-                if poster.is_none() && thumb.is_none() {
+                // 文件没变且确实无任何封面（含库内独立目录记录）才派发截帧
+                if !has_any_cover {
                     if let Some(sender) = cover_tx {
                         let video_id = existing_info.id.clone();
                         let _ = sender.send((video_id, path_str.clone()));
@@ -470,8 +493,10 @@ impl ScannerService {
             || existing.as_ref().map(|e| e.original_title.clone()),
         ).unwrap_or_else(|| filename.clone());
 
-        // 判断扫描状态：同时存在 .nfo 文件和 poster 即为已刮削（状态2）
-        let scan_status = if nfo_mtime.is_some() && poster.is_some() {
+        // 判断扫描状态：同时存在 .nfo 文件和 poster 即为已刮削（状态2）。
+        // 独立目录模式下 NFO/封面不在视频同级、扫描看不到，故已刮削项保持状态不回退。
+        let already_scraped = existing.as_ref().map(|e| e.scan_status == 2).unwrap_or(false);
+        let scan_status = if (nfo_mtime.is_some() && poster.is_some()) || already_scraped {
             2
         } else {
             1
@@ -522,9 +547,9 @@ impl ScannerService {
                 resolution: resolution.clone(),
                 local_id: local_id.as_deref(),
                 rating,
-                poster: poster.clone(),
-                thumb: thumb.clone(),
-                fanart: fanart.clone(),
+                poster: preserved_poster.clone(),
+                thumb: preserved_thumb.clone(),
+                fanart: preserved_fanart.clone(),
                 file_mtime,
                 nfo_mtime,
                 poster_mtime,
@@ -609,8 +634,8 @@ impl ScannerService {
             }
         }
 
-        // 无封面 → 派发截帧任务（与扫描并行执行）
-        if poster_mtime.is_none() && thumb_mtime.is_none() {
+        // 无封面 → 派发截帧任务（与扫描并行执行）；库内独立目录已有封面则跳过
+        if !has_any_cover {
             if let Some(sender) = cover_tx {
                 let _ = sender.send((video_id.clone(), path_str.clone()));
             }
@@ -652,6 +677,12 @@ fn path_mtime(path: &Path) -> Option<i64> {
 
 fn path_mtime_from_str(path: &str) -> Option<i64> {
     path_mtime(Path::new(path))
+}
+
+/// 封面路径是否指向存在的文件（用于判断库内已记录的封面是否仍有效）。
+fn cover_path_exists(path: &str) -> bool {
+    let trimmed = path.trim();
+    !trimmed.is_empty() && Path::new(trimmed).exists()
 }
 
 /// 读取本地封面尺寸（仅读图头，开销小）。无封面或读取失败时返回 (None, None)。

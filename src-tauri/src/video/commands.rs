@@ -392,6 +392,10 @@ pub async fn move_video_file(app: AppHandle, db: State<'_, crate::db::Database>,
 
     let conn = db.get_connection()?;
     let app_clone = app.clone();
+    // 独立目录模式配置（用于移动后同步 .strm）
+    let storage_cfg = crate::media::assets::MetadataStorageConfig::from_settings(
+        &crate::settings::get_settings(app.clone()).await.unwrap_or_default(),
+    );
 
     tokio::task::spawn_blocking(move || {
         let _app = app_clone;
@@ -399,12 +403,12 @@ pub async fn move_video_file(app: AppHandle, db: State<'_, crate::db::Database>,
         // 校验目标路径在已注册的扫描目录范围内
         super::service::validate_path_within_managed_dirs(&conn, Path::new(&target_dir))?;
 
-        // 查询视频路径和同级图路径
-        let (current_path, poster, thumb, fanart): (String, Option<String>, Option<String>, Option<String>) = conn
+        // 查询视频路径、同级图路径与番号
+        let (current_path, poster, thumb, fanart, local_id): (String, Option<String>, Option<String>, Option<String>, Option<String>) = conn
             .query_row(
-                "SELECT video_path, poster, thumb, fanart FROM videos WHERE id = ?",
+                "SELECT video_path, poster, thumb, fanart, local_id FROM videos WHERE id = ?",
                 [&id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )?;
 
         let current_path_obj = Path::new(&current_path);
@@ -430,10 +434,11 @@ pub async fn move_video_file(app: AppHandle, db: State<'_, crate::db::Database>,
         }
 
         // 3. 移动同级图片资源
+        // 仅搬动与视频同级的图；独立元数据目录里的图留在原地（库内路径不变）
         let move_artwork = |path_opt: Option<String>, label: &str| -> AppResult<Option<String>> {
             if let Some(path) = path_opt {
                 let source = Path::new(&path);
-                if source.exists() {
+                if source.exists() && source.parent() == current_path_obj.parent() {
                     let file_name = source.file_name().ok_or_else(|| AppError::Business(format!("无效的{}文件名", label)))?;
                     let target = Path::new(&target_dir).join(file_name);
                     move_file(source, &target).map_err(|e| AppError::Business(format!("移动{}失败: {}", label, e)))?;
@@ -470,6 +475,15 @@ pub async fn move_video_file(app: AppHandle, db: State<'_, crate::db::Database>,
             ],
         )?;
 
+        // 独立目录模式：把对应番号的 .strm 指向新视频路径（外部媒体库点播才不会失效）
+        if let Err(e) = crate::media::assets::sync_independent_strm(
+            &storage_cfg,
+            local_id.as_deref().unwrap_or_default(),
+            &new_path_str,
+        ) {
+            log::warn!("[video_move] event=sync_strm_failed video_id={} error={}", id, e);
+        }
+
         Ok(())
     })
     .await
@@ -489,6 +503,10 @@ pub async fn update_video(app: AppHandle, db: State<'_, crate::db::Database>, id
 
     let mut conn = db.get_connection()?;
     let app_clone = app.clone();
+    // 独立目录模式配置（用于重命名后同步 .strm）
+    let storage_cfg = crate::media::assets::MetadataStorageConfig::from_settings(
+        &crate::settings::get_settings(app.clone()).await.unwrap_or_default(),
+    );
 
     tokio::task::spawn_blocking(move || {
         let _app = app_clone;
@@ -682,8 +700,33 @@ pub async fn update_video(app: AppHandle, db: State<'_, crate::db::Database>, id
             }
         }
 
-        crate::media::assets::save_nfo_for_video(&final_video_path, &rewritten_nfo_metadata)
-            .map_err(|e| AppError::Business(e))?;
+        // 独立目录模式：视频被重命名/移动时，同步对应番号的 .strm 指向新路径
+        if final_video_path != current.video_path {
+            if let Err(e) = crate::media::assets::sync_independent_strm(
+                &storage_cfg,
+                current.local_id.as_deref().unwrap_or_default(),
+                &final_video_path,
+            ) {
+                log::warn!("[video_update] event=sync_strm_failed video_id={} error={}", id, e);
+            }
+        }
+
+        // 独立目录模式：把更新后的 NFO 写回独立目录；非独立 / 未找到时回退写视频同级
+        let wrote_independent_nfo = match crate::media::assets::save_nfo_to_independent_dir(
+            &storage_cfg,
+            current.local_id.as_deref().unwrap_or_default(),
+            &rewritten_nfo_metadata,
+        ) {
+            Ok(wrote) => wrote,
+            Err(e) => {
+                log::warn!("[video_update] event=save_independent_nfo_failed video_id={} error={}", id, e);
+                false
+            }
+        };
+        if !wrote_independent_nfo {
+            crate::media::assets::save_nfo_for_video(&final_video_path, &rewritten_nfo_metadata)
+                .map_err(|e| AppError::Business(e))?;
+        }
 
         tx.commit()?;
 

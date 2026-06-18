@@ -57,8 +57,9 @@ pub async fn scan_directory(app: AppHandle, path: String) -> Result<ScanSummary,
                     let _ = Database::update_video_cover_paths(
                         &conn,
                         &r.video_id,
-                        &r.poster_path,
-                            None,
+                        r.artwork.poster.as_deref(),
+                        r.artwork.thumb.as_deref(),
+                        r.artwork.fanart.as_deref(),
                     );
                 }
             }
@@ -102,7 +103,7 @@ pub async fn scan_directory(app: AppHandle, path: String) -> Result<ScanSummary,
 #[derive(Clone)]
 struct CoverResult {
     video_id: String,
-    poster_path: String,
+    artwork: crate::media::artwork::ArtworkResult,
 }
 
 /// 封面截帧 dispatcher：从 channel 接收任务，使用自适应并发执行 ffmpeg 截帧
@@ -169,7 +170,7 @@ async fn cover_dispatcher(
 
                 crate::media::ffmpeg::extract_frame(&vpath, timestamp, &output_str)?;
 
-                // 只保存 poster，不生成重复的 thumb（避免浪费磁盘空间）
+                // 截帧为横版 → 产出标准图集（fanart + thumb，并右裁出竖版 poster）
                 let video_path_obj = std::path::Path::new(&vpath);
                 let parent_dir = video_path_obj
                     .parent()
@@ -177,17 +178,23 @@ async fn cover_dispatcher(
                 let file_stem = video_path_obj
                     .file_stem()
                     .ok_or("无效的文件名")?
-                    .to_string_lossy();
-                let poster_path = parent_dir.join(format!("{}-poster.jpg", file_stem));
+                    .to_string_lossy()
+                    .to_string();
 
-                std::fs::copy(&output, &poster_path)
-                    .map_err(|e| format!("保存 poster 失败: {}", e))?;
+                let artwork = crate::media::artwork::produce_artwork_from_local_image(
+                    parent_dir,
+                    &file_stem,
+                    &output,
+                );
 
                 // 清理临时文件和目录
                 let _ = std::fs::remove_file(&output);
                 let _ = std::fs::remove_dir(&temp_dir);
 
-                Ok::<String, String>(poster_path.to_string_lossy().to_string())
+                if artwork.fanart.is_none() && artwork.poster.is_none() {
+                    return Err("保存封面失败".to_string());
+                }
+                Ok::<crate::media::artwork::ArtworkResult, String>(artwork)
             })
             .await
             .unwrap_or(Err("Task join failed".to_string()));
@@ -196,10 +203,14 @@ async fn cover_dispatcher(
             let total_val = total.load(Ordering::Relaxed);
 
             match result {
-                Ok(poster_path) => {
+                Ok(artwork) => {
+                    let cover_path = artwork
+                        .primary_dimension_path()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
                     results.lock().await.push(CoverResult {
                         video_id: vid.clone(),
-                        poster_path: poster_path.clone(),
+                        artwork,
                     });
 
                     let _ = app.emit(
@@ -207,7 +218,7 @@ async fn cover_dispatcher(
                         serde_json::json!({
                             "videoId": vid,
                             "status": "completed",
-                            "thumbPath": poster_path,
+                            "thumbPath": cover_path,
                             "completed": done,
                             "total": total_val,
                             "concurrency": limiter.current_limit(),

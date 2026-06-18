@@ -675,9 +675,12 @@ impl Database {
     /// 检查视频是否有封面图
     pub fn has_cover_image(&self, video_path: &str) -> Result<bool> {
         let conn = self.get_connection()?;
+        // 任一标准图集列存在即视为有封面（竖裁失败时可能仅有横版 fanart/thumb）
         let has_cover: bool = conn
             .query_row(
-                "SELECT poster IS NOT NULL
+                "SELECT (poster IS NOT NULL AND poster <> '')
+                     OR (fanart IS NOT NULL AND fanart <> '')
+                     OR (thumb IS NOT NULL AND thumb <> '')
                  FROM videos WHERE video_path = ?1",
                 params![video_path],
                 |row| row.get(0),
@@ -689,12 +692,13 @@ impl Database {
     pub fn update_video_cover_paths(
         conn: &Connection,
         video_id: &str,
-        poster_path: &str,
+        poster_path: Option<&str>,
         thumb_path: Option<&str>,
+        fanart_path: Option<&str>,
     ) -> Result<()> {
         conn.execute(
-            "UPDATE videos SET poster = ?, thumb = ?, updated_at = datetime('now') WHERE id = ?",
-            rusqlite::params![poster_path, thumb_path, video_id],
+            "UPDATE videos SET poster = ?, thumb = ?, fanart = ?, updated_at = datetime('now') WHERE id = ?",
+            rusqlite::params![poster_path, thumb_path, fanart_path, video_id],
         )?;
         Ok(())
     }
@@ -724,6 +728,8 @@ impl Database {
                 duration = ?,
                 rating = ?,
                 poster = ?,
+                thumb = ?,
+                fanart = ?,
                 local_id = ?,
                 cover_width = ?,
                 cover_height = ?,
@@ -741,6 +747,8 @@ impl Database {
                 data.duration,
                 data.rating.unwrap_or(0.0),
                 data.poster,
+                data.thumb,
+                data.fanart,
                 data.local_id,
                 data.cover_width,
                 data.cover_height,
@@ -818,7 +826,8 @@ impl Database {
             "SELECT
                 video_path, id, title, original_title, studio, premiered, director,
                 local_id, rating, file_size, fast_hash, duration, resolution,
-                file_mtime, nfo_mtime, poster_mtime, thumb_mtime, fanart_mtime
+                file_mtime, nfo_mtime, poster_mtime, thumb_mtime, fanart_mtime,
+                poster, thumb, fanart, scan_status
             FROM videos
             WHERE dir_path LIKE ? || '%'"
         )?;
@@ -843,6 +852,10 @@ impl Database {
                     poster_mtime: row.get(15)?,
                     thumb_mtime: row.get(16)?,
                     fanart_mtime: row.get(17)?,
+                    poster: row.get(18)?,
+                    thumb: row.get(19)?,
+                    fanart: row.get(20)?,
+                    scan_status: row.get::<_, Option<i32>>(21)?.unwrap_or(1),
                 },
             ))
         })?;
@@ -1046,7 +1059,11 @@ impl Database {
                 nfo_mtime,
                 poster_mtime,
                 thumb_mtime,
-                fanart_mtime
+                fanart_mtime,
+                poster,
+                thumb,
+                fanart,
+                scan_status
             FROM videos
             WHERE video_path = ?",
             params![video_path],
@@ -1069,6 +1086,10 @@ impl Database {
                     poster_mtime: row.get(14)?,
                     thumb_mtime: row.get(15)?,
                     fanart_mtime: row.get(16)?,
+                    poster: row.get(17)?,
+                    thumb: row.get(18)?,
+                    fanart: row.get(19)?,
+                    scan_status: row.get::<_, Option<i32>>(20)?.unwrap_or(1),
                 })
             },
         )
