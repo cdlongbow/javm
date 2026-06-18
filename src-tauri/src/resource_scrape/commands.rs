@@ -467,9 +467,12 @@ pub(crate) async fn scrape_and_fuse(
         max_webview_windows: fetch_settings.max_webview_windows,
     };
 
+    // 有码无码分轨：无码作品走无码/综合源，有码作品走有码/综合源
+    let is_uncensored = crate::utils::designation_recognizer::is_uncensored_designation(&code);
     let scrape_sources: Vec<Box<dyn Source>> = sources::all_sources()
         .into_iter()
         .filter(|s| enabled_ids.iter().any(|id| id.eq_ignore_ascii_case(s.name())))
+        .filter(|s| s.capability().handles(is_uncensored))
         .collect();
 
     // 区分「一个源都没启用」与「有源但没刮到」：无任何可用源时给出可操作的错误，
@@ -814,9 +817,12 @@ pub async fn rs_search_resource(
             })
             .collect()
     } else {
+        // 有码无码分轨：无码作品走无码/综合源，有码作品走有码/综合源
+        let is_uncensored = crate::utils::designation_recognizer::is_uncensored_designation(&code);
         sources::all_sources()
             .into_iter()
             .filter(|s| enabled_site_ids.iter().any(|id| id.eq_ignore_ascii_case(s.name())))
+            .filter(|s| s.capability().handles(is_uncensored))
             .collect()
     };
 

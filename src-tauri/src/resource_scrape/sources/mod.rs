@@ -4,6 +4,7 @@
 //! 以及数据源注册和默认网站配置函数。
 
 pub mod av123;
+pub mod avsox;
 pub mod common;
 pub mod freejavbt;
 pub mod javbus;
@@ -27,6 +28,28 @@ mod parser_robustness_test;
 use serde::{Deserialize, Serialize};
 pub use super::types::SearchResult;
 
+/// 数据源对有码/无码作品的支持能力（有码无码分轨：按番号类型路由数据源）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceCapability {
+    /// 有码无码都支持（多数综合源，默认）
+    General,
+    /// 仅有码
+    CensoredOnly,
+    /// 仅无码（无码专用源，如 avsox）
+    UncensoredOnly,
+}
+
+impl SourceCapability {
+    /// 该能力的源是否应处理给定类型的番号（is_uncensored=true 表示无码作品）。
+    pub fn handles(&self, is_uncensored: bool) -> bool {
+        match self {
+            SourceCapability::General => true,
+            SourceCapability::CensoredOnly => !is_uncensored,
+            SourceCapability::UncensoredOnly => is_uncensored,
+        }
+    }
+}
+
 /// 数据源 trait
 ///
 /// 每个数据源实现 `parse(html) -> Option<SearchResult>` 和 `build_url(code) -> String`。
@@ -41,6 +64,11 @@ pub trait Source: Send + Sync {
     /// 从搜索结果页提取详情页 URL（需要二次请求的数据源覆盖此方法）
     fn extract_detail_url(&self, _html: &str, _code: &str) -> Option<String> {
         None
+    }
+    /// 数据源对有码/无码的支持能力（默认综合源，有码无码都查）。
+    /// 无码专用源覆盖为 `UncensoredOnly`，纯有码源覆盖为 `CensoredOnly`。
+    fn capability(&self) -> SourceCapability {
+        SourceCapability::General
     }
 }
 
@@ -80,6 +108,7 @@ pub fn all_sources() -> Vec<Box<dyn Source>> {
         Box::new(javgg::JavGG),
         Box::new(javmost::JavMost),
         Box::new(sextb::SexTB),
+        Box::new(avsox::Avsox),
     ]
 }
 
@@ -194,6 +223,13 @@ pub fn default_sites() -> Vec<ResourceSite> {
         ResourceSite {
             id: "sextb".to_string(),
             name: "数据源 16".to_string(),
+            enabled: true,
+            avg_score: None,
+            scrape_count: None,
+        },
+        ResourceSite {
+            id: "avsox".to_string(),
+            name: "数据源 17（无码）".to_string(),
             enabled: true,
             avg_score: None,
             scrape_count: None,
