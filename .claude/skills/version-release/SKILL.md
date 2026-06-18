@@ -1,6 +1,6 @@
 ---
 name: version-release
-description: "版本升级与发布。触发词：发布版本、发版、升级版本、升级小/中/大版本、升级 patch/minor/major、升级 alpha/beta 版本、打 tag、推送远程。小版本=patch，中版本=minor，大版本=major。"
+description: "版本升级与发布。触发词：发布版本、发版、升级版本、升级小/中/大版本、升级 patch/minor/major、升级 alpha/beta/rc 版本、发布 beta 版本、发布 rc 版本、预发布、打 tag、推送远程。小版本=patch，中版本=minor，大版本=major；beta/rc 为预发布，tag 带后缀且仅对应更新通道用户可收到。"
 ---
 
 # 版本升级与发布
@@ -14,8 +14,31 @@ description: "版本升级与发布。触发词：发布版本、发版、升级
 | 小版本 / patch | patch |
 | 中版本 / minor | minor |
 | 大版本 / major | major |
-| alpha / beta / 预发布 | 让用户提供完整版本号，如 `0.3.1-alpha.1` |
+| 发 beta / 发布 beta 版本 | 预发布，tag 形如 `vX.Y.Z-beta.N`，见「预发布与更新通道」 |
+| 发 rc / 发布 rc 版本 | 预发布，tag 形如 `vX.Y.Z-rc.N`，见「预发布与更新通道」 |
+| alpha / beta / rc / 预发布 | 让用户提供完整版本号，如 `0.6.0-beta.1`、`0.6.0-rc.1` |
 | 发版 / 发布版本（未指定级别） | 询问用户选择 patch / minor / major 或输入完整版本号 |
+
+## 预发布与更新通道
+
+应用内更新按「更新通道」分发（设置 → 关于 → 更新通道）：**正式版 / RC / Beta**。**tag 是否带预发布后缀决定哪些用户能收到这次发布**：
+
+| tag 形式 | 例子 | 哪些通道用户会收到 |
+|---------|------|------------------|
+| 无后缀（正式版） | `v0.6.0` | 全部（正式版 / RC / Beta） |
+| `-rc.N`（RC） | `v0.6.0-rc.1` | 仅 RC、Beta 通道；正式版通道**不会**收到 |
+| `-beta.N`（Beta） | `v0.6.0-beta.1` | 仅 Beta 通道 |
+
+机制（无需额外操作，已由 CI 处理）：
+- 版本号带 `-` 后缀 → GitHub Release 自动标记为 prerelease → 不会成为 GitHub「latest」→ 正式版通道（端点 `releases/latest`）不受影响。
+- RC/Beta 通道由后端调 GitHub Releases API 解析对应后缀的最新 tag，指向该 release 的 `latest.json`（CI 的 `includeUpdaterJson: true` 保证每个预发布也带此资产）。
+- **版本号必须单调递增**：同一基线按 `-beta.1 → -beta.2 → -rc.1 → 正式 0.6.0` 迭代；不要在正式版发布后再发该基线更低的预发布（semver 比较会导致收不到）。
+
+确定下一个预发布版本号（用户说「发 beta 版本」但没给完整号时）：
+1. 查最近 tag：`git tag --sort=-version:refname`。
+2. 若已存在同基线的 `-beta.N`，则序号 +1（如 `0.6.0-beta.1` → `0.6.0-beta.2`）；从 beta 进入 rc 则用 `-rc.1`。
+3. 若要在新基线起步，用「目标正式版-beta.1」（如准备 0.6.0，则 `0.6.0-beta.1`）。
+4. **先与用户确认基线版本号与序号，再执行 `bun run vb -- <完整版本号>`**。
 
 ## 工具约束
 

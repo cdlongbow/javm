@@ -1,6 +1,6 @@
 ---
 name: version-release
-description: "用于版本升级与发布流程。当用户提到：升级小版本、升级中版本、升级大版本、升级补丁版本、升级次版本、升级主版本、升级 alpha 版本、升级 beta 版本、升级预发布版本、升级发布、发版、发布版本、打 tag、推送远程、生成 release 日志、发布日志时使用。对小/中/大版本分别映射到 patch/minor/major。若用户提到 alpha、beta、预发布版本，则允许直接指定完整版本号，例如 0.1.5-alpha.1、0.1.5-beta.1。若用户只说升级发布或发版，在支持多项选择时先让用户选择 patch、minor、major 或直接输入完整预发布版本号，然后完成版本升级、生成发布日志、git commit、git tag、push 分支和 push tag。"
+description: "用于版本升级与发布流程。当用户提到：升级小版本、升级中版本、升级大版本、升级补丁版本、升级次版本、升级主版本、升级 alpha 版本、升级 beta 版本、升级 rc 版本、发布 beta 版本、发布 rc 版本、升级预发布版本、升级发布、发版、发布版本、打 tag、推送远程、生成 release 日志、发布日志时使用。对小/中/大版本分别映射到 patch/minor/major。若用户提到 alpha、beta、rc、预发布版本，则允许直接指定完整版本号，例如 0.1.5-alpha.1、0.1.5-beta.1、0.1.5-rc.1；预发布版本仅对应更新通道（Beta/RC）的用户可收到。若用户只说升级发布或发版，在支持多项选择时先让用户选择 patch、minor、major 或直接输入完整预发布版本号，然后完成版本升级、生成发布日志、git commit、git tag、push 分支和 push tag。"
 ---
 
 # 版本升级与发布
@@ -25,8 +25,22 @@ description: "用于版本升级与发布流程。当用户提到：升级小版
 - 发布日志文件使用 `docs/releases/v<version>.md` 命名，并与版本升级提交一起进入仓库。
 - 发布日志模板统一参考 `docs/releases/TEMPLATE.md`。
 - 发布日志的总结范围必须是“上一个已发布 tag”到“即将发布的 tag”之间的全部提交，不是只看本次版本升级提交。
-- 版本号支持 semver 预发布后缀，例如：`0.1.5-alpha`、`0.1.5-alpha.1`、`0.1.5-beta`、`0.1.5-beta.1`；对应 tag 形如 `v0.1.5-beta.1`。
+- 版本号支持 semver 预发布后缀，例如：`0.1.5-alpha`、`0.1.5-alpha.1`、`0.1.5-beta`、`0.1.5-beta.1`、`0.1.5-rc.1`；对应 tag 形如 `v0.1.5-beta.1`。
 - 提交、tag、推送前先检查工作区状态，避免把用户未确认的改动带上去。
+
+## 预发布与更新通道
+
+应用内更新按「更新通道」分发（设置 → 关于 → 更新通道）：正式版 / RC / Beta。tag 是否带预发布后缀决定哪些用户能收到本次发布：
+
+- 无后缀（如 `v0.6.0`）= 正式版，全部通道用户都会收到。
+- `-rc.N`（如 `v0.6.0-rc.1`）= RC，仅 RC、Beta 通道用户收到，正式版通道不会收到。
+- `-beta.N`（如 `v0.6.0-beta.1`）= Beta，仅 Beta 通道用户收到。
+
+机制（CI 已自动处理，无需手动操作）：版本号带 `-` 后缀时，GitHub Release 自动标记 prerelease，不会成为 GitHub「latest」，正式版通道（端点 `releases/latest`）因此不受影响；RC/Beta 通道由后端调 GitHub Releases API 解析对应后缀的最新 tag，并依赖每个预发布 release 都带 `latest.json` 资产（`includeUpdaterJson: true` 已保证）。
+
+注意事项：
+- 版本号必须单调递增，按 `-beta.1 → -beta.2 → -rc.1 → 正式 0.6.0` 迭代；不要在正式版发布后再发该基线更低的预发布。
+- 用户说「发 beta / 发 rc 版本」但没给完整版本号时：先 `git tag --sort=-version:refname` 查最近 tag，若已有同基线 `-beta.N` 则序号 +1，否则用「目标正式版-beta.1」（如准备 0.6.0 则 `0.6.0-beta.1`）；务必先与用户确认基线版本与序号，再执行 `bun run vb -- <完整版本号>`。
 
 ## 执行流程
 
