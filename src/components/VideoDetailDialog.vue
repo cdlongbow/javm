@@ -396,34 +396,14 @@ const handleScrape = async () => {
     isScraping.value = true
 
     try {
-        // 使用设置中的默认刮削网站，只请求单个数据源
-        const defaultSite = settingsStore.settings.scrape?.defaultSite || 'javbus'
-        await scrapeStore.search(localId, defaultSite)
+        // 详情刮削没有选择列表：并发查询所有已启用数据源并按字段融合出最佳结果
+        const best = await scrapeStore.scrapeFused(localId)
 
-        // 等待搜索完成（监听 searchLoading 变为 false）
-        await new Promise<void>((resolve) => {
-            const stopWatch = watch(() => scrapeStore.searchLoading, (loading) => {
-                if (!loading) {
-                    stopWatch()
-                    resolve()
-                }
-            }, { immediate: true })
-        })
-
-        if (scrapeStore.searchError) {
-            toast.error('刮削失败: ' + scrapeStore.searchError)
-            isScraping.value = false
-            return
-        }
-
-        if (scrapeStore.results.length === 0) {
+        if (!best) {
             toast.warning('未找到该番号的信息，请检查番号是否正确')
             isScraping.value = false
             return
         }
-
-        // 自动选取第一个搜索结果填充表单
-        const best = scrapeStore.results[0]
 
         formData.value = {
             ...formData.value,

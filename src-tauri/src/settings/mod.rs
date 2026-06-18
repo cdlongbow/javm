@@ -402,32 +402,6 @@ pub fn enabled_scrape_sites(scrape: &ScrapeSettings) -> Vec<ResourceSite> {
 /// `default_site` 的特殊取值：自动选择累计丰富度得分最高的已启用数据源。
 pub const AUTO_HIGHEST_SCORE_SITE: &str = "__auto_highest_score__";
 
-pub fn resolve_active_scrape_site(scrape: &ScrapeSettings) -> Option<ResourceSite> {
-    // 自动模式：在已启用数据源中选丰富度得分最高者（得分并列时取靠前者）；
-    // 都没有得分时退化为第一个已启用的数据源。
-    if scrape.default_site == AUTO_HIGHEST_SCORE_SITE {
-        let mut best: Option<&ResourceSite> = None;
-        for site in scrape.sites.iter().filter(|s| s.enabled) {
-            let cur = (site.avg_score.unwrap_or(0), site.scrape_count.unwrap_or(0));
-            let is_better = match best {
-                Some(b) => cur > (b.avg_score.unwrap_or(0), b.scrape_count.unwrap_or(0)),
-                None => true,
-            };
-            if is_better {
-                best = Some(site);
-            }
-        }
-        return best.cloned();
-    }
-
-    scrape
-        .sites
-        .iter()
-        .find(|site| site.id == scrape.default_site && site.enabled)
-        .cloned()
-        .or_else(|| scrape.sites.iter().find(|site| site.enabled).cloned())
-}
-
 pub fn resolve_scrape_fetch_settings(scrape: &ScrapeSettings) -> ScrapeFetchSettings {
     ScrapeFetchSettings {
         webview_enabled: scrape.webview_enabled,

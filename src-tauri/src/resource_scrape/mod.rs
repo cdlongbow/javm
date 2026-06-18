@@ -10,6 +10,7 @@
 
 pub mod types;
 pub mod anti_block;
+pub mod fusion;
 pub mod database_writer;
 pub mod detector;
 pub mod sources;

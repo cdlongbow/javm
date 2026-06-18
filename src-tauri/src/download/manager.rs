@@ -506,7 +506,6 @@ async fn capture_cover_as_fallback(app: &tauri::AppHandle, video_path: &str) -> 
 
 /// 执行刮削操作
 async fn perform_scrape(app: &tauri::AppHandle, video_path: &str) -> Result<(), String> {
-    use crate::resource_scrape::{fetcher::Fetcher, sources::{self, ResourceSite}};
     use crate::resource_scrape::database_writer::DatabaseWriter;
     use crate::media::assets::save_nfo_for_video;
     use crate::db::Database;
@@ -519,111 +518,15 @@ async fn perform_scrape(app: &tauri::AppHandle, video_path: &str) -> Result<(), 
         designation
     );
 
-    // 2. 获取元数据
-    let settings = crate::settings::get_settings(app.clone()).await.unwrap_or_default();
-    let site = crate::settings::resolve_active_scrape_site(&settings.scrape)
-        .ok_or_else(|| "未启用任何刮削网站，请先在设置中开启至少一个网站".to_string())?;
-    let source = sources::all_sources()
-        .into_iter()
-        .find(|item| item.name() == site.id)
-        .ok_or_else(|| format!("未找到默认刮削网站解析器: {}", site.id))?;
-
-    let url = source.build_url(&designation);
-    log::info!(
-        "[auto_scrape] event=fetch_started path={} source={} designation={} url={}",
-        video_path,
-        source.name(),
-        designation,
-        url
-    );
-
-    // 创建 Fetcher 获取 HTML（HTTP 抓取由反爬引擎统一编排）
-    let fetcher = Fetcher::new();
-    // 自动刮削无搜索取消语义，传永不取消的令牌以保持原有抓取行为
+    // 2. 多源抓取 + 字段级融合，产出比单源更完整的最佳元数据（无选择列表 → 自动融合）
     let scrape_cancel = tokio_util::sync::CancellationToken::new();
-
-    let fetch_settings = crate::settings::resolve_scrape_fetch_settings(&settings.scrape);
-    let html = fetcher
-        .fetch(
-            app,
-            &url,
-            &site,
-            crate::resource_scrape::fetcher::FetchOptions {
-                webview_enabled: fetch_settings.webview_enabled,
-                webview_fallback_enabled: fetch_settings.webview_fallback_enabled,
-                show_webview: fetch_settings.dev_show_webview,
-                max_webview_windows: fetch_settings.max_webview_windows,
-            },
-            &scrape_cancel,
-        )
-        .await
-        .map_err(|e| format!("获取页面失败: {}", e))?;
+    let search_result =
+        crate::resource_scrape::commands::scrape_and_fuse(app, &designation, &scrape_cancel)
+            .await?
+            .ok_or_else(|| format!("未找到该番号的信息: {}", designation))?;
 
     log::info!(
-        "[auto_scrape] event=fetch_succeeded path={} source={} html_length={}",
-        video_path,
-        source.name(),
-        html.len()
-    );
-
-    // 检查是否需要二次请求详情页
-    let parse_html = if let Some(detail_url) = source.extract_detail_url(&html, &designation) {
-        let detail_url_string = detail_url.to_string();
-        log::info!(
-            "[auto_scrape] event=detail_fetch_started path={} detail_url={}",
-            video_path,
-            detail_url_string
-        );
-        let detail_site = ResourceSite {
-            id: site.id.clone(),
-            name: site.name.clone(),
-            enabled: true,
-            avg_score: None,
-            scrape_count: None,
-        };
-        match fetcher
-            .fetch(
-                app,
-                &detail_url_string,
-                &detail_site,
-                crate::resource_scrape::fetcher::FetchOptions {
-                    webview_enabled: fetch_settings.webview_enabled,
-                    webview_fallback_enabled: fetch_settings.webview_fallback_enabled,
-                    show_webview: fetch_settings.dev_show_webview,
-                    max_webview_windows: fetch_settings.max_webview_windows,
-                },
-                &scrape_cancel,
-            )
-            .await
-        {
-            Ok(dh) => {
-                log::info!(
-                    "[auto_scrape] event=detail_fetch_succeeded path={} html_length={}",
-                    video_path,
-                    dh.len()
-                );
-                dh
-            }
-            Err(e) => {
-                log::warn!(
-                    "[auto_scrape] event=detail_fetch_failed path={} fallback=search_page error={}",
-                    video_path,
-                    e
-                );
-                html
-            }
-        }
-    } else {
-        html
-    };
-
-    // 解析元数据
-    let search_result = source
-        .parse(&parse_html, &designation)
-        .ok_or_else(|| format!("解析元数据失败: 番号 {}", designation))?;
-
-    log::info!(
-        "[auto_scrape] event=parse_succeeded path={} title={}",
+        "[auto_scrape] event=fused_succeeded path={} title={}",
         video_path,
         search_result.title
     );

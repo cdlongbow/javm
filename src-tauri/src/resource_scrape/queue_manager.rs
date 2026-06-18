@@ -12,8 +12,6 @@
 use crate::db::{Database, ScrapeStatus};
 use crate::resource_scrape::database_writer::DatabaseWriter;
 use crate::resource_scrape::detector::ScrapedVideoDetector;
-use crate::resource_scrape::fetcher::Fetcher;
-use crate::resource_scrape::sources::{self, ResourceSite};
 use crate::resource_scrape::types::ScrapeMetadata;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -293,95 +291,15 @@ impl TaskQueueManager {
             return Err("Task stopped".to_string());
         }
 
-        // 步骤 2: 使用设置中的默认刮削网站获取元数据
-        let settings = crate::settings::get_settings(self.app.clone()).await.unwrap_or_default();
-        let active_site = crate::settings::resolve_active_scrape_site(&settings.scrape)
-            .ok_or_else(|| "未启用任何刮削网站，请先在设置中开启至少一个网站".to_string())?;
-        let source = sources::all_sources()
-            .into_iter()
-            .find(|item| item.name() == active_site.id)
-            .ok_or_else(|| format!("未找到默认刮削网站解析器: {}", active_site.id))?;
-        let site = active_site;
-
-        let url = source.build_url(&designation);
-        log::info!(
-            "[scrape_queue] event=fetch_started task_id={} source={} designation={} url={}",
-            task_id,
-            source.name(),
-            designation,
-            url
-        );
-
-        // 创建 Fetcher 获取 HTML（HTTP 抓取由反爬引擎统一编排）
-        let fetcher = Fetcher::new();
-        // 队列用 is_stopped 标志控制流程，此处传永不取消的令牌以保持原有抓取行为
+        // 步骤 2: 多源抓取 + 字段级融合，产出比单源更完整的最佳元数据（无选择列表 → 自动融合）
         let scrape_cancel = tokio_util::sync::CancellationToken::new();
-
-        let fetch_settings = crate::settings::resolve_scrape_fetch_settings(&settings.scrape);
-        let fetch_options = crate::resource_scrape::fetcher::FetchOptions {
-            webview_enabled: fetch_settings.webview_enabled,
-            webview_fallback_enabled: fetch_settings.webview_fallback_enabled,
-            show_webview: fetch_settings.dev_show_webview,
-            max_webview_windows: fetch_settings.max_webview_windows,
-        };
-        let html = fetcher
-            .fetch(&self.app, &url, &site, fetch_options, &scrape_cancel)
-            .await
-            .map_err(|e| format!("获取页面失败: {}", e))?;
+        let search_result =
+            super::commands::scrape_and_fuse(&self.app, &designation, &scrape_cancel)
+                .await?
+                .ok_or_else(|| format!("未找到该番号的信息: {}", designation))?;
 
         log::info!(
-            "[scrape_queue] event=fetch_succeeded task_id={} source={} html_length={}",
-            task_id,
-            source.name(),
-            html.len()
-        );
-
-        // 检查是否需要二次请求详情页
-        let parse_html = if let Some(detail_url) = source.extract_detail_url(&html, &designation) {
-            log::info!(
-                "[scrape_queue] event=detail_fetch_started task_id={} detail_url={}",
-                task_id,
-                detail_url
-            );
-            let detail_site = ResourceSite {
-                id: site.id.clone(),
-                name: site.name.clone(),
-                enabled: true,
-                avg_score: None,
-                scrape_count: None,
-            };
-            match fetcher
-                .fetch(&self.app, &detail_url, &detail_site, fetch_options, &scrape_cancel)
-                .await
-            {
-                Ok(dh) => {
-                    log::info!(
-                        "[scrape_queue] event=detail_fetch_succeeded task_id={} html_length={}",
-                        task_id,
-                        dh.len()
-                    );
-                    dh
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[scrape_queue] event=detail_fetch_failed task_id={} fallback=search_page error={}",
-                        task_id,
-                        e
-                    );
-                    html
-                }
-            }
-        } else {
-            html
-        };
-
-        // 解析元数据
-        let search_result = source
-            .parse(&parse_html, &designation)
-            .ok_or_else(|| format!("解析元数据失败: 番号 {}", designation))?;
-
-        log::info!(
-            "[scrape_queue] event=parse_succeeded task_id={} title={}",
+            "[scrape_queue] event=fused_succeeded task_id={} title={}",
             task_id,
             search_result.title
         );

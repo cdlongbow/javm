@@ -357,6 +357,174 @@ fn associate_search_evidence(
     }
 }
 
+// ==================== 字段级跨源融合（无选择列表的自动刮削路径用） ====================
+
+/// 抓取并解析单个源 → `SearchResult`（含 detail_score）。失败/无效返回 None。
+async fn fetch_and_parse_source(
+    app: &AppHandle,
+    source: &dyn Source,
+    site: &ResourceSite,
+    code: &str,
+    fetch_options: super::fetcher::FetchOptions,
+    preferred_cover_type: &str,
+    cancel: &CancellationToken,
+) -> Option<SearchResult> {
+    let fetcher = Fetcher::new();
+    let url = source.build_url(code);
+    let html = fetcher.fetch(app, &url, site, fetch_options, cancel).await.ok()?;
+
+    let (parse_html, final_url) = match source.extract_detail_url(&html, code) {
+        Some(detail) => {
+            let detail = normalize_result_url(&detail, &url);
+            match fetcher.fetch(app, &detail, site, fetch_options, cancel).await {
+                Ok(dh) => (dh, detail),
+                Err(_) => (html, url.clone()),
+            }
+        }
+        None => (html, url.clone()),
+    };
+
+    let mut result = source.parse(&parse_html, code)?;
+    if !is_valid_search_result(&result) {
+        return None;
+    }
+    result.page_url = final_url.clone();
+    normalize_search_result_urls(&mut result, &final_url);
+    enrich_search_result_detail(&mut result, preferred_cover_type);
+    Some(result)
+}
+
+/// MetaTube 最优结果（就绪才有，best-effort），加入融合池。
+async fn metatube_top_result(
+    app: &AppHandle,
+    code: &str,
+    preferred_cover_type: &str,
+) -> Option<SearchResult> {
+    let (client, providers) = {
+        let manager = app.try_state::<crate::metatube::MetaTubeManager>()?;
+        let client = manager.client()?;
+        (client, manager.config().providers)
+    };
+    let candidates = client.search(code, &providers).await.ok()?;
+    let top = candidates.into_iter().next()?;
+    let info = client.get_movie(&top.provider, &top.id).await.ok()?;
+    let mut result = crate::metatube::client::movie_info_to_search_result(info);
+    if !is_valid_search_result(&result) {
+        return None;
+    }
+    let page_url = result.page_url.clone();
+    normalize_search_result_urls(&mut result, &page_url);
+    enrich_search_result_detail(&mut result, preferred_cover_type);
+    Some(result)
+}
+
+/// 多源抓取 + 字段融合：并发抓所有启用自研源（+ MetaTube 最优），融合成一条最佳结果。
+/// 供无选择列表的路径（详情刮削 / 批量 / 下载后自动）自动产出最佳元数据；远程图片 URL 不代理，
+/// 由调用方按需下载/代理。
+pub(crate) async fn scrape_and_fuse(
+    app: &AppHandle,
+    code: &str,
+    cancel: &CancellationToken,
+) -> Result<Option<SearchResult>, String> {
+    // 与交互搜索 rs_search_resource 对齐：无连字符输入补连字符并归一化（ssis666 → SSIS-666）。
+    // 队列/下载传入的已是识别后的大写番号，归一化对其为安全 no-op。
+    let code = normalize_search_code(code);
+    if code.is_empty() {
+        return Ok(None);
+    }
+
+    let settings = settings::get_settings(app.clone()).await.unwrap_or_default();
+    let enabled_sites = settings::enabled_scrape_sites(&settings.scrape);
+    let enabled_ids: Vec<String> = enabled_sites.iter().map(|s| s.id.clone()).collect();
+    let fetch_settings = settings::resolve_scrape_fetch_settings(&settings.scrape);
+    let preferred_cover_type = settings.general.cover_type.clone();
+    let fetch_options = super::fetcher::FetchOptions {
+        webview_enabled: fetch_settings.webview_enabled,
+        webview_fallback_enabled: fetch_settings.webview_fallback_enabled,
+        show_webview: fetch_settings.dev_show_webview,
+        max_webview_windows: fetch_settings.max_webview_windows,
+    };
+
+    let scrape_sources: Vec<Box<dyn Source>> = sources::all_sources()
+        .into_iter()
+        .filter(|s| enabled_ids.iter().any(|id| id.eq_ignore_ascii_case(s.name())))
+        .collect();
+
+    let max_concurrent = (settings.scrape.concurrent.max(1) as usize).max(1);
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+
+    let mut handles = Vec::new();
+    for source in scrape_sources {
+        let app = app.clone();
+        let code = code.clone();
+        let cancel = cancel.clone();
+        let semaphore = semaphore.clone();
+        let cover = preferred_cover_type.clone();
+        let site = enabled_sites
+            .iter()
+            .find(|s| s.id.eq_ignore_ascii_case(source.name()))
+            .cloned()
+            .unwrap_or(ResourceSite {
+                id: source.name().to_string(),
+                name: source.name().to_string(),
+                enabled: true,
+                avg_score: None,
+                scrape_count: None,
+            });
+        handles.push(tokio::spawn(async move {
+            let _permit = semaphore.acquire().await.ok()?;
+            if cancel.is_cancelled() {
+                return None;
+            }
+            fetch_and_parse_source(&app, source.as_ref(), &site, &code, fetch_options, &cover, &cancel)
+                .await
+        }));
+    }
+
+    let mut results: Vec<SearchResult> = Vec::new();
+    for handle in handles {
+        if let Ok(Some(result)) = handle.await {
+            results.push(result);
+        }
+    }
+
+    // MetaTube 最优加入融合池（best-effort）
+    if !cancel.is_cancelled() {
+        if let Some(mt) = metatube_top_result(app, &code, &preferred_cover_type).await {
+            results.push(mt);
+        }
+    }
+
+    log::info!("[scrape_fuse] event=fused code={} sources={}", code, results.len());
+    Ok(super::fusion::merge_sources(results))
+}
+
+/// 详情刮削命令：多源融合产出最佳结果（不入库，供前端填表单/预览）。封面/缩略图代理本地缓存以便展示。
+#[tauri::command]
+pub async fn rs_scrape_fused(app: AppHandle, code: String) -> Result<Option<SearchResult>, String> {
+    let cancel = CancellationToken::new();
+    let Some(mut result) = scrape_and_fuse(&app, &code, &cancel).await? else {
+        return Ok(None);
+    };
+    // 图片代理到本地缓存供对话框展示（保留 remote_* 供保存时下载）
+    if let Ok(http) = fingerprint_client::shared_client() {
+        if !result.thumbs.is_empty() {
+            let page_url = result.page_url.clone();
+            let (display, remote) =
+                proxy_preview_images_to_files(&http, &result.thumbs, &page_url).await;
+            result.thumbs = display;
+            result.remote_thumb_urls = remote;
+        }
+        if result.cover_url.starts_with("http://") || result.cover_url.starts_with("https://") {
+            if let Ok(local) = proxy_image_to_file(&http, &result.cover_url).await {
+                result.remote_cover_url = Some(result.cover_url.clone());
+                result.cover_url = local;
+            }
+        }
+    }
+    Ok(Some(result))
+}
+
 /// 归一化搜索输入番号：补连字符（`ssis666` → `SSIS-666`），让无连字符输入与标准写法
 /// 得到一致的搜索结果。**保守**：仅当识别结果与原输入「去连字符大写后一致」（即只是重整
 /// 连字符、未另抽成别的番号）才采用；否则原样大写返回，避免误伤 FC2-PPV、素人数字前缀等。

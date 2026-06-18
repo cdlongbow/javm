@@ -452,6 +452,13 @@ export const useResourceScrapeStore = defineStore('resourceScrape', () => {
         }
     }
 
+    /** 多源字段级融合刮削：无选择列表的场景（视频详情/批量/下载后自动刮削），
+     *  并发查询所有已启用数据源 + MetaTube，按字段融合出一个最完整的最佳结果 */
+    async function scrapeFused(code: string): Promise<ResourceItem | null> {
+        const raw = await invoke<BackendSearchResult | null>('rs_scrape_fused', { code })
+        return raw ? toResourceItem(raw) : null
+    }
+
     // ============ 刮削任务操作 ============
 
     async function fetchTasks() {
@@ -849,6 +856,7 @@ export const useResourceScrapeStore = defineStore('resourceScrape', () => {
         cancelSearch,
         // 刮削保存
         scrapeSave,
+        scrapeFused,
         // 任务操作
         fetchTasks,
         createTask,
