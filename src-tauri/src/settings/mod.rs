@@ -25,6 +25,39 @@ pub struct AppSettings {
     pub video_player: VideoPlayerSettings,
     #[serde(default, rename = "mainWindow")]
     pub main_window: MainWindowSettings,
+    #[serde(default)]
+    pub metatube: MetaTubeSettings,
+}
+
+/// MetaTube sidecar 聚合源设置
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MetaTubeSettings {
+    /// 是否启用（默认开启；关闭则不拉起 sidecar、该源被跳过）
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 偏好的 provider 列表（搜索时优先；空 = 服务端默认全部）
+    #[serde(default)]
+    pub providers: Vec<String>,
+}
+
+impl Default for MetaTubeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            providers: Vec::new(),
+        }
+    }
+}
+
+impl MetaTubeSettings {
+    /// 派生 sidecar 运行配置
+    pub fn to_config(&self) -> crate::metatube::MetaTubeConfig {
+        crate::metatube::MetaTubeConfig {
+            enabled: self.enabled,
+            providers: self.providers.clone(),
+            extra_args: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -607,6 +640,7 @@ impl Default for AppSettings {
             ad_filter: AdFilterSettings::default(),
             video_player: VideoPlayerSettings::default(),
             main_window: MainWindowSettings::default(),
+            metatube: MetaTubeSettings::default(),
         }
     }
 }

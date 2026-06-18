@@ -149,6 +149,7 @@ jobs:
             nm3u8_asset_key: win-x64
             nm3u8_asset_ext: .zip
             nm3u8_target: N_m3u8DL-RE.exe
+            metatube_os_arch: windows-amd64
             bundle_targets: nsis
           # 暂不发布 Windows ARM64：wreq 依赖的 BoringSSL（boring-sys2）在
           # aarch64-pc-windows-msvc 上无法汇编 ARM64 crypto 汇编（NASM 不支持
@@ -162,6 +163,7 @@ jobs:
             nm3u8_asset_key: osx-x64
             nm3u8_asset_ext: .tar.gz
             nm3u8_target: N_m3u8DL-RE
+            metatube_os_arch: darwin-amd64
             bundle_targets: app,dmg
           - platform: macos
             arch: arm64
@@ -170,6 +172,7 @@ jobs:
             nm3u8_asset_key: osx-arm64
             nm3u8_asset_ext: .tar.gz
             nm3u8_target: N_m3u8DL-RE
+            metatube_os_arch: darwin-arm64
             bundle_targets: app,dmg
           - platform: linux
             arch: x64
@@ -178,6 +181,7 @@ jobs:
             nm3u8_asset_key: linux-x64
             nm3u8_asset_ext: .tar.gz
             nm3u8_target: N_m3u8DL-RE
+            metatube_os_arch: linux-amd64
             bundle_targets: appimage,deb
           - platform: linux
             arch: arm64
@@ -186,6 +190,7 @@ jobs:
             nm3u8_asset_key: linux-arm64
             nm3u8_asset_ext: .tar.gz
             nm3u8_target: N_m3u8DL-RE
+            metatube_os_arch: linux-arm64
             bundle_targets: appimage,deb
 
     steps:
@@ -443,6 +448,55 @@ jobs:
           Write-Host "✅ FFmpeg 就绪：$targetPath"
           Write-Host "::endgroup::"
 
+      - name: Download MetaTube sidecar
+        shell: pwsh
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # ⚠️ 资产命名按 metatube-community/metatube-server-releases 的 os-arch 约定（如 windows-amd64），
+          # 上线前请按实际 Release 资产核对 pattern。本步骤非致命（continue-on-error + 内部 exit 0）：
+          # 缺二进制时 app 运行期 resolve 失败 → 该源回退跳过，不影响自研源与发布。
+          Write-Host "::group::下载 MetaTube sidecar（${{ matrix.metatube_os_arch }}）"
+          $osArch = '${{ matrix.metatube_os_arch }}'
+          $binDir = Join-Path $PWD 'src-tauri/bin'
+          $downloadDir = Join-Path $env:RUNNER_TEMP 'metatube-download'
+          $extractDir = Join-Path $env:RUNNER_TEMP 'metatube-extract'
+          foreach ($d in @($downloadDir, $extractDir)) {
+            if (Test-Path $d) { Remove-Item $d -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $d | Out-Null
+          }
+          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+          Get-ChildItem -Path $binDir -File -Filter 'metatube-server*' -ErrorAction SilentlyContinue | Remove-Item -Force
+
+          $binName = if ('${{ matrix.platform }}' -eq 'windows') { 'metatube-server.exe' } else { 'metatube-server' }
+          # 精确匹配基础版 zip：每平台另有 *-v3.zip（仅新 CPU AVX 可用），`*$osArch*` 会误匹配，故用精确名。
+          gh release download --repo metatube-community/metatube-server-releases --pattern "metatube-server-$osArch.zip" --dir $downloadDir
+          $asset = Get-ChildItem $downloadDir -File | Select-Object -First 1
+          if (-not $asset) { Write-Host "::warning::未找到 MetaTube $osArch 资产，跳过打包（运行时回退）"; Write-Host "::endgroup::"; exit 0 }
+
+          if ($asset.Extension -eq '.zip') {
+            Expand-Archive -Path $asset.FullName -DestinationPath $extractDir -Force
+          } elseif ($asset.Name -like '*.tar.gz' -or $asset.Name -like '*.tgz') {
+            tar -xzf $asset.FullName -C $extractDir
+          } else {
+            Copy-Item $asset.FullName (Join-Path $extractDir $asset.Name) -Force
+          }
+
+          # 用 -File 仅选文件，避免误选同名目录（FFmpeg arm64 曾踩此坑）
+          if ('${{ matrix.platform }}' -eq 'windows') {
+            $exe = Get-ChildItem $extractDir -Recurse -File -Filter '*metatube*server*.exe' | Select-Object -First 1
+          } else {
+            $exe = Get-ChildItem $extractDir -Recurse -File | Where-Object { $_.Name -like '*metatube*server*' -and $_.Extension -eq '' } | Select-Object -First 1
+          }
+          if (-not $exe) { Write-Host "::warning::解压后未找到 MetaTube 可执行文件，跳过打包"; Write-Host "::endgroup::"; exit 0 }
+
+          $targetPath = Join-Path $binDir $binName
+          Copy-Item $exe.FullName $targetPath -Force
+          if ('${{ matrix.platform }}' -ne 'windows') { chmod +x $targetPath }
+          Write-Host "✅ MetaTube 就绪：$targetPath"
+          Write-Host "::endgroup::"
+
       - name: Verify bundled sidecars
         shell: pwsh
         run: |
@@ -464,6 +518,12 @@ jobs:
           }
           if (-not ($files | Where-Object { $_.Name -like 'ffmpeg*' })) {
             throw '校验失败：bin 目录缺少 ffmpeg。'
+          }
+          # MetaTube 为非致命可选 sidecar：缺失仅告警（运行时回退跳过该源）
+          if (-not ($files | Where-Object { $_.Name -like 'metatube-server*' })) {
+            Write-Host '::warning::bin 目录缺少 metatube-server，MetaTube 聚合源将回退跳过（不影响自研源）。'
+          } else {
+            Write-Host '✅ MetaTube sidecar 已就位。'
           }
           Write-Host "✅ sidecar 校验通过，将被打包进 resources。"
           Write-Host "::endgroup::"

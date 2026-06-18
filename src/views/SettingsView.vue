@@ -3,6 +3,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Plus, GripVertical, Edit, Trash2, ExternalLink, ChevronsUpDown, Copy } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
+import { invoke } from '@tauri-apps/api/core'
 import packageInfo from '../../package.json'
 import appLogo from '../../src-tauri/icons/128x128.png'
 import { useSettingsStore, useUpdaterStore } from '@/stores'
@@ -62,6 +63,45 @@ const settingsStore = useSettingsStore()
 const updaterStore = useUpdaterStore()
 const appVersion = packageInfo.version
 const isDeveloperMode = import.meta.env.DEV
+
+// ===== MetaTube 聚合源 =====
+interface MetaTubeStatusSnapshot {
+  status: string
+  port: number | null
+  binaryPresent: boolean
+  restarts: number
+  lastError: string | null
+}
+const metatubeStatus = ref<MetaTubeStatusSnapshot | null>(null)
+const metatubeRestarting = ref(false)
+const metatubeStatusText = computed(() => {
+  const map: Record<string, string> = {
+    ready: '运行中', starting: '启动中', failed: '启动失败', stopped: '已停止', disabled: '已禁用',
+  }
+  return map[metatubeStatus.value?.status ?? ''] ?? '未知'
+})
+async function loadMetatubeStatus() {
+  try {
+    metatubeStatus.value = await invoke<MetaTubeStatusSnapshot>('metatube_status')
+  } catch (e) {
+    console.warn('获取 MetaTube 状态失败:', e)
+  }
+}
+async function restartMetatube() {
+  metatubeRestarting.value = true
+  try {
+    metatubeStatus.value = await invoke<MetaTubeStatusSnapshot>('metatube_restart')
+    toast.success('已请求重启 MetaTube')
+    setTimeout(loadMetatubeStatus, 2500)
+  } catch (e) {
+    toast.error(`重启失败: ${(e as Error).message || e}`)
+  } finally {
+    metatubeRestarting.value = false
+  }
+}
+function saveMetatube(patch: Partial<import('@/types').MetaTubeSettings>) {
+  settingsStore.updateSettings({ metatube: { ...settingsStore.settings.metatube, ...patch } })
+}
 const exportingLogs = ref(false)
 
 const updateStatusText = computed(() => {
@@ -337,6 +377,9 @@ onMounted(async () => {
   if (route.query.tab) {
     activeTab.value = route.query.tab as string
   }
+
+  // 加载 MetaTube sidecar 状态
+  loadMetatubeStatus()
 })
 
 // 刮削设置
@@ -1050,6 +1093,48 @@ watch(() => settingsStore.settings, async (newSettings) => {
                     <p class="text-xs text-muted-foreground">支持 http/https/socks5 协议；保存后按成功率自动加权选择</p>
                   </div>
                 </template>
+              </CardContent>
+            </Card>
+
+            <!-- MetaTube 聚合源 -->
+            <Card>
+              <CardHeader>
+                <CardTitle>MetaTube 聚合源</CardTitle>
+                <CardDescription>本地聚合刮削服务，随应用启动；失败自动重试，不可用时回退跳过，不影响其它数据源</CardDescription>
+              </CardHeader>
+              <CardContent class="space-y-6">
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <p class="font-medium">启用 MetaTube</p>
+                    <p class="text-sm text-muted-foreground">作为一个聚合数据源参与并发搜索与评分排序</p>
+                  </div>
+                  <Switch :model-value="!!settingsStore.settings.metatube.enabled"
+                    @update:model-value="(v: boolean) => saveMetatube({ enabled: v })" />
+                </div>
+
+                <Separator />
+
+                <div class="flex items-center justify-between gap-4">
+                  <div class="min-w-0">
+                    <p class="font-medium">运行状态</p>
+                    <p class="text-sm text-muted-foreground">
+                      {{ metatubeStatusText }}
+                      <span v-if="metatubeStatus?.port"> · 端口 {{ metatubeStatus.port }}</span>
+                      <span v-if="metatubeStatus && !metatubeStatus.binaryPresent" class="text-destructive"> · 未检测到二进制</span>
+                      <span v-if="metatubeStatus && metatubeStatus.restarts > 0"> · 已重启 {{ metatubeStatus.restarts }} 次</span>
+                    </p>
+                    <p v-if="metatubeStatus?.lastError" class="mt-1 truncate text-xs text-muted-foreground">
+                      最近错误：{{ metatubeStatus.lastError }}
+                    </p>
+                  </div>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <Badge :variant="metatubeStatus?.status === 'ready' ? 'default' : 'secondary'">{{ metatubeStatusText }}</Badge>
+                    <Button variant="outline" size="sm" :disabled="metatubeRestarting" @click="restartMetatube">
+                      {{ metatubeRestarting ? '重启中...' : '重启' }}
+                    </Button>
+                    <Button variant="ghost" size="sm" @click="loadMetatubeStatus">刷新</Button>
+                  </div>
+                </div>
               </CardContent>
             </Card>
 

@@ -378,6 +378,159 @@ fn normalize_search_code(raw: &str) -> String {
     fallback
 }
 
+/// MetaTube 单次搜索最多贡献的结果数（命中该番号的 provider 候选取前 N 个，避免刷屏/过慢）。
+const MAX_METATUBE_RESULTS: usize = 10;
+
+/// MetaTube 聚合源搜索：一次 search 拿到多个 provider 候选 → 各取详情**并发** emit（限量 N）。
+/// 任何不就绪/出错都静默跳过（回退），不影响自研源。
+async fn run_metatube_search(
+    app: &AppHandle,
+    code: &str,
+    preferred_cover_type: &str,
+    token: &CancellationToken,
+    alias_evidence: &std::sync::Arc<std::sync::Mutex<Vec<SourceEvidence>>>,
+) {
+    // 先取出 client + providers，避免把 State 守卫跨 await 持有
+    let (client, providers) = {
+        let Some(manager) = app.try_state::<crate::metatube::MetaTubeManager>() else {
+            return;
+        };
+        let Some(client) = manager.client() else {
+            return; // 未就绪 → 回退跳过
+        };
+        (client, manager.config().providers)
+    };
+
+    let candidates = match client.search(code, &providers).await {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("[scrape_search] event=metatube_search_failed code={} error={}", code, e);
+            return;
+        }
+    };
+    if candidates.is_empty() {
+        log::info!("[scrape_search] event=metatube_no_result code={}", code);
+        return;
+    }
+    log::info!(
+        "[scrape_search] event=metatube_candidates code={} count={}",
+        code,
+        candidates.len()
+    );
+
+    // 多个 provider 候选各取详情，并发处理后 emit 多条结果
+    let mut handles = Vec::new();
+    for cand in candidates.into_iter().take(MAX_METATUBE_RESULTS) {
+        if token.is_cancelled() {
+            break;
+        }
+        let client = client.clone();
+        let app = app.clone();
+        let cover = preferred_cover_type.to_string();
+        let token = token.clone();
+        let alias_evidence = alias_evidence.clone();
+        handles.push(tauri::async_runtime::spawn(async move {
+            emit_metatube_candidate(&app, &client, cand, &cover, &token, &alias_evidence).await;
+        }));
+    }
+    for handle in handles {
+        let _ = handle.await;
+    }
+}
+
+/// 取单个 provider 候选的详情 → 映射 → 后处理（图片代理/翻译/评分/关联）→ emit。
+/// best-effort：失败静默跳过该 provider，不影响其它。
+async fn emit_metatube_candidate(
+    app: &AppHandle,
+    client: &crate::metatube::client::MetaTubeClient,
+    cand: crate::metatube::types::MovieSearchResult,
+    preferred_cover_type: &str,
+    token: &CancellationToken,
+    alias_evidence: &std::sync::Arc<std::sync::Mutex<Vec<SourceEvidence>>>,
+) {
+    let info = match client.get_movie(&cand.provider, &cand.id).await {
+        Ok(i) => i,
+        Err(e) => {
+            log::warn!(
+                "[scrape_search] event=metatube_detail_failed provider={} id={} error={}",
+                cand.provider,
+                cand.id,
+                e
+            );
+            return;
+        }
+    };
+    if token.is_cancelled() {
+        return;
+    }
+
+    let mut result = crate::metatube::client::movie_info_to_search_result(info);
+    if !is_valid_search_result(&result) {
+        return;
+    }
+
+    let page_url = result.page_url.clone();
+    normalize_search_result_urls(&mut result, &page_url);
+
+    // 图片代理（防盗链 → 本地缓存），与自研源一致
+    if let Ok(http) = fingerprint_client::shared_client() {
+        if !result.thumbs.is_empty() {
+            let (display, remote) =
+                proxy_preview_images_to_files(&http, &result.thumbs, &page_url).await;
+            result.thumbs = display;
+            result.remote_thumb_urls = remote;
+        }
+        if result.cover_url.starts_with("http://") || result.cover_url.starts_with("https://") {
+            if let Ok(local) = proxy_image_to_file(&http, &result.cover_url).await {
+                result.remote_cover_url = Some(result.cover_url.clone());
+                result.cover_orientation = detect_cover_orientation(&local);
+                result.cover_url = local;
+            }
+        }
+    }
+
+    // 同番号关联证据：每个 provider 作独立来源，保证单人作判定按 provider 计数
+    {
+        let studios: Vec<String> = [result.studio.trim(), result.maker.trim()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        let actors: Vec<String> = result
+            .actors
+            .split(['、', ',', '，'])
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .collect();
+        if !studios.is_empty() || !actors.is_empty() {
+            if let Ok(mut guard) = alias_evidence.lock() {
+                guard.push(SourceEvidence {
+                    source: format!("{}:{}", crate::metatube::SOURCE_ID, cand.provider),
+                    studios,
+                    actors,
+                });
+            }
+        }
+    }
+
+    log::info!(
+        "[scrape_search] event=metatube_succeeded provider={} code={} title={}",
+        cand.provider,
+        result.code,
+        result.title
+    );
+
+    let mut result_to_emit =
+        match crate::utils::ai_translator::translate_search_result(app, &result).await {
+            Ok(translated) => translated,
+            Err(_) => result,
+        };
+    enrich_search_result_detail(&mut result_to_emit, preferred_cover_type);
+    if !token.is_cancelled() {
+        let _ = app.emit("search-result", &result_to_emit);
+    }
+}
+
 #[tauri::command]
 pub async fn rs_search_resource(
     app: AppHandle,
@@ -425,6 +578,22 @@ pub async fn rs_search_resource(
     // 用户偏好的封面方向，用于封面比例评分
     let preferred_cover_type = app_settings.general.cover_type.clone();
 
+    // MetaTube 聚合源：启用 + 已就绪 + (未指定单源 或 指定的就是 metatube) 才参与；
+    // 未就绪/未启用则跳过（回退，不影响自研源）。
+    let run_metatube = {
+        let requested = source
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case(crate::metatube::SOURCE_ID))
+            .unwrap_or(true);
+        requested
+            && app
+                .try_state::<crate::metatube::MetaTubeManager>()
+                .map(|m| {
+                    m.config().enabled && m.status() == crate::metatube::MetaTubeStatus::Ready
+                })
+                .unwrap_or(false)
+    };
+
     // 根据 source 参数和启用状态过滤数据源
     let search_sources: Vec<Box<dyn Source>> = if let Some(ref site_id) = source {
         sources::all_sources()
@@ -444,7 +613,7 @@ pub async fn rs_search_resource(
             .collect()
     };
 
-    if search_sources.is_empty() {
+    if search_sources.is_empty() && !run_metatube {
         log::warn!(
             "[scrape_search] event=no_available_source requested_source={:?} enabled_sites={:?}",
             source,
@@ -680,6 +849,19 @@ pub async fn rs_search_resource(
                     log::error!("[scrape_search] event=fetch_failed source={} code={} url={} error={}", name, code, url, e);
                 }
             }
+        });
+        handles.push(handle);
+    }
+
+    // MetaTube 聚合源（独立任务，与自研源并发；不就绪则前面已判定 run_metatube=false）
+    if run_metatube {
+        let app = app.clone();
+        let code = code.clone();
+        let token = token.clone();
+        let alias_evidence = alias_evidence.clone();
+        let preferred_cover_type = preferred_cover_type.clone();
+        let handle = tokio::spawn(async move {
+            run_metatube_search(&app, &code, &preferred_cover_type, &token, &alias_evidence).await;
         });
         handles.push(handle);
     }

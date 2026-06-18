@@ -16,6 +16,7 @@ pub mod nfo;
 pub mod resource_scrape;
 pub mod scanner;
 pub mod entity_alias;
+pub mod metatube;
 pub mod utils;
 
 use tauri::{AppHandle, Manager};
@@ -24,6 +25,11 @@ use tokio::sync::Mutex;
 
 async fn cleanup_before_exit(app: &AppHandle) {
     if let Some(manager) = app.try_state::<download::manager::DownloadManager>() {
+        manager.shutdown().await;
+    }
+
+    // MetaTube sidecar 随应用关闭（取消监督 + 强杀进程，避免残留）
+    if let Some(manager) = app.try_state::<metatube::MetaTubeManager>() {
         manager.shutdown().await;
     }
 
@@ -279,6 +285,25 @@ pub fn run() {
             app.manage(resource_scrape::fetcher::WebviewPoolState::default());
             app.manage(resource_scrape::commands::SearchCancelState::new());
 
+            // 初始化 MetaTube sidecar（聚合刮削源，随应用启动；失败自动重试，放弃则回退跳过）
+            {
+                let metatube_config = initial_settings
+                    .as_ref()
+                    .map(|settings| settings.metatube.to_config())
+                    .unwrap_or_default();
+                let db_path = app
+                    .path()
+                    .app_data_dir()
+                    .map(|dir| dir.join("metatube.db"))
+                    .unwrap_or_else(|_| std::path::PathBuf::from("metatube.db"));
+                if let Some(parent) = db_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let manager = metatube::MetaTubeManager::new(db_path, metatube_config);
+                manager.start();
+                app.manage(manager);
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -371,6 +396,9 @@ pub fn run() {
             resource_scrape::commands::rs_get_video_sites,
             resource_scrape::commands::rs_analyze_hls,
             resource_scrape::commands::rs_check_video_exists_by_code,
+            // MetaTube sidecar
+            metatube::commands::metatube_status,
+            metatube::commands::metatube_restart,
             // 跨语言别名
             entity_alias::commands::entity_alias_expand,
             entity_alias::commands::entity_alias_inspect,

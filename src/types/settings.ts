@@ -151,6 +151,12 @@ export interface MainWindowSettings {
     y?: number
 }
 
+/** MetaTube sidecar 聚合源设置 */
+export interface MetaTubeSettings {
+    enabled: boolean        // 是否启用（默认开启）
+    providers: string[]     // 偏好 provider 列表（空 = 服务端默认全部）
+}
+
 /** 完整应用设置 */
 export interface AppSettings {
     theme: ThemeSettings
@@ -160,6 +166,7 @@ export interface AppSettings {
     ai: AISettings
     videoPlayer: VideoPlayerSettings
     mainWindow: MainWindowSettings
+    metatube: MetaTubeSettings
 }
 
 /** 默认设置 */
@@ -242,5 +249,9 @@ export const defaultSettings: AppSettings = {
     videoPlayer: {
         alwaysOnTop: false,
     },
-    mainWindow: {}
+    mainWindow: {},
+    metatube: {
+        enabled: true,
+        providers: [],
+    },
 }

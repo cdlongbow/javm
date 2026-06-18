@@ -54,6 +54,7 @@ export const useSettingsStore = defineStore('settings', () => {
                 ai: { ...defaultSettings.ai, ...loaded.ai },
                 videoPlayer: { ...defaultSettings.videoPlayer, ...loaded.videoPlayer },
                 mainWindow: { ...defaultSettings.mainWindow, ...loaded.mainWindow },
+                metatube: { ...defaultSettings.metatube, ...loaded.metatube },
             }
             applyTheme(settings.value.theme.mode)
         } catch (e) {
@@ -82,6 +83,7 @@ export const useSettingsStore = defineStore('settings', () => {
                 ai: newSettings.ai ? { ...settings.value.ai, ...newSettings.ai } : settings.value.ai,
                 videoPlayer: newSettings.videoPlayer ? { ...settings.value.videoPlayer, ...newSettings.videoPlayer } : settings.value.videoPlayer,
                 mainWindow: newSettings.mainWindow ? { ...settings.value.mainWindow, ...newSettings.mainWindow } : settings.value.mainWindow,
+                metatube: newSettings.metatube ? { ...settings.value.metatube, ...newSettings.metatube } : settings.value.metatube,
             }
 
             await saveSettings(settings.value)
