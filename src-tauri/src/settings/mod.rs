@@ -27,6 +27,64 @@ pub struct AppSettings {
     pub main_window: MainWindowSettings,
     #[serde(default)]
     pub metatube: MetaTubeSettings,
+    #[serde(default)]
+    pub update: UpdateSettings,
+    #[serde(default)]
+    pub metadata: MetadataSettings,
+}
+
+/// 元数据（NFO + 图片）存储设置
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MetadataSettings {
+    /// 存储模式："follow_video"（跟随视频，默认）/ "independent"（独立目录）
+    #[serde(rename = "storageMode", default = "default_metadata_storage_mode")]
+    pub storage_mode: String,
+    /// 独立目录模式下的元数据根目录（绝对路径）
+    #[serde(rename = "rootDir", default)]
+    pub root_dir: String,
+}
+
+/// 元数据独立目录模式的标识值
+pub const METADATA_MODE_INDEPENDENT: &str = "independent";
+
+fn default_metadata_storage_mode() -> String {
+    "follow_video".to_string()
+}
+
+impl Default for MetadataSettings {
+    fn default() -> Self {
+        Self {
+            storage_mode: default_metadata_storage_mode(),
+            root_dir: String::new(),
+        }
+    }
+}
+
+impl MetadataSettings {
+    /// 是否启用独立目录模式（需选择 independent 且根目录非空）
+    pub fn is_independent(&self) -> bool {
+        self.storage_mode == METADATA_MODE_INDEPENDENT && !self.root_dir.trim().is_empty()
+    }
+}
+
+/// 应用更新设置
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UpdateSettings {
+    /// 更新通道："stable"（仅正式版）/ "rc"（含 RC）/ "beta"（含 Beta 和 RC）
+    #[serde(default = "default_update_channel")]
+    pub channel: String,
+}
+
+fn default_update_channel() -> String {
+    "stable".to_string()
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            channel: default_update_channel(),
+        }
+    }
 }
 
 /// MetaTube sidecar 聚合源设置
@@ -620,6 +678,8 @@ impl Default for AppSettings {
             video_player: VideoPlayerSettings::default(),
             main_window: MainWindowSettings::default(),
             metatube: MetaTubeSettings::default(),
+            update: UpdateSettings::default(),
+            metadata: MetadataSettings::default(),
         }
     }
 }

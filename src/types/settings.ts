@@ -158,6 +158,23 @@ export interface MetaTubeSettings {
     providers: string[]     // 偏好 provider 列表（空 = 服务端默认全部）
 }
 
+/** 更新通道：stable=仅正式版，rc=含 RC，beta=含 Beta 和 RC */
+export type UpdateChannel = 'stable' | 'rc' | 'beta'
+
+/** 应用更新设置 */
+export interface UpdateSettings {
+    channel: UpdateChannel
+}
+
+/** 元数据存储模式：follow_video=跟随视频同目录，independent=独立目录 */
+export type MetadataStorageMode = 'follow_video' | 'independent'
+
+/** 元数据（NFO + 图片）存储设置 */
+export interface MetadataSettings {
+    storageMode: MetadataStorageMode   // 存储模式
+    rootDir: string                    // 独立目录模式下的元数据根目录
+}
+
 /** 完整应用设置 */
 export interface AppSettings {
     theme: ThemeSettings
@@ -168,6 +185,8 @@ export interface AppSettings {
     videoPlayer: VideoPlayerSettings
     mainWindow: MainWindowSettings
     metatube: MetaTubeSettings
+    update: UpdateSettings
+    metadata: MetadataSettings
 }
 
 /** 默认设置 */
@@ -255,5 +274,12 @@ export const defaultSettings: AppSettings = {
     metatube: {
         enabled: true,
         providers: [],
+    },
+    update: {
+        channel: 'stable',
+    },
+    metadata: {
+        storageMode: 'follow_video',
+        rootDir: '',
     },
 }

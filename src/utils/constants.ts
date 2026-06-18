@@ -118,6 +118,19 @@ export const COVER_TYPE_OPTIONS = [
     { label: '竖屏', value: 'portrait' },
 ]
 
+/** 更新通道选项 */
+export const UPDATE_CHANNEL_OPTIONS = [
+    { label: '正式版', value: 'stable', desc: '仅接收稳定的正式发布版本' },
+    { label: 'RC（候选版）', value: 'rc', desc: '接收 RC 候选版及正式版' },
+    { label: 'Beta（测试版）', value: 'beta', desc: '接收 Beta、RC 及正式版，尝鲜但可能不稳定' },
+]
+
+/** 元数据存储模式选项 */
+export const METADATA_STORAGE_MODE_OPTIONS = [
+    { label: '跟随视频', value: 'follow_video', desc: 'NFO 与图片保存在视频同目录（默认）' },
+    { label: '独立目录', value: 'independent', desc: 'NFO 与图片集中存到独立根目录，按「番号 标题」分子目录并生成 .strm，兼容 Emby/Kodi/Jellyfin' },
+]
+
 /**
  * 封面卡片布局配置
  * - landscape：横屏封面，沿用 800x536 比例（JAV fanart 大封面）

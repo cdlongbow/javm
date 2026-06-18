@@ -35,12 +35,79 @@ fn is_updater_not_configured_error(message: &str) -> bool {
         || lower.contains("updater") && lower.contains("config")
 }
 
-fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+const GITHUB_REPO: &str = "ddmoyu/javm";
+
+/// 判断某个 release tag 是否属于指定更新通道。
+/// 正式版（无预发布后缀）对所有通道可见；rc 通道额外接收 `-rc`；
+/// beta 通道额外接收 `-beta` 和 `-rc`（即越靠前的通道收到越多，alpha 不在任何通道内）。
+fn tag_matches_channel(tag: &str, channel: &str) -> bool {
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    if !version.contains('-') {
+        return true; // 正式版
+    }
+    let lower = version.to_ascii_lowercase();
+    match channel {
+        "rc" => lower.contains("-rc"),
+        "beta" => lower.contains("-beta") || lower.contains("-rc"),
+        _ => false,
+    }
+}
+
+/// 预发布通道：调用 GitHub Releases API，按创建时间倒序找到首个符合通道的版本，
+/// 返回其 `latest.json` 资产地址。失败或无匹配时返回 None（回退到默认正式版端点）。
+/// 客户端走代理，保证仅代理可达 GitHub 的网络下预发布通道也能解析。
+async fn resolve_prerelease_endpoint(channel: &str) -> Option<String> {
+    let client = proxy::apply_proxy_auto(wreq::Client::builder())
+        .ok()?
+        .build()
+        .ok()?;
+    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=30");
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "javm-updater")
+        .header("Accept", "application/vnd.github+json")
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .ok()?;
+    let releases: serde_json::Value = resp.json().await.ok()?;
+    for release in releases.as_array()? {
+        if release.get("draft").and_then(|v| v.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let Some(tag) = release.get("tag_name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if tag_matches_channel(tag, channel) {
+            return Some(format!(
+                "https://github.com/{GITHUB_REPO}/releases/download/{tag}/latest.json"
+            ));
+        }
+    }
+    None
+}
+
+async fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     let mut builder = app
         .updater_builder()
         .header("User-Agent", "tauri-updater")
         .map_err(|e| format!("设置请求头失败: {e}"))?
         .timeout(Duration::from_secs(60));
+
+    // 读取更新通道：rc/beta 时改用对应预发布版本的端点，stable 保持默认（仅正式版）
+    let channel = crate::settings::get_settings(app.clone())
+        .await
+        .map(|settings| settings.update.channel)
+        .unwrap_or_else(|_| "stable".to_string());
+    if channel == "rc" || channel == "beta" {
+        if let Some(endpoint) = resolve_prerelease_endpoint(&channel).await {
+            if let Ok(parsed) = url::Url::parse(&endpoint) {
+                builder = builder
+                    .endpoints(vec![parsed])
+                    .map_err(|e| format!("设置更新端点失败: {e}"))?;
+            }
+        }
+    }
 
     if let Some(config_dir) = app.path().app_config_dir().ok() {
         if let Some(proxy_url) = proxy::resolve_proxy_url(&config_dir) {
@@ -82,7 +149,7 @@ async fn fetch_release_body_from_github(version: &str) -> Option<String> {
 pub async fn check_app_update(app: AppHandle) -> Result<AppUpdateInfo, String> {
     let current_version = app.package_info().version.to_string();
 
-    let updater = match build_updater(&app) {
+    let updater = match build_updater(&app).await {
         Ok(updater) => updater,
         Err(error) if is_updater_not_configured_error(&error) => {
             return Err(UPDATER_NOT_CONFIGURED.to_string());
@@ -137,7 +204,7 @@ pub async fn check_app_update(app: AppHandle) -> Result<AppUpdateInfo, String> {
 
 #[tauri::command]
 pub async fn install_app_update(app: AppHandle) -> Result<String, String> {
-    let updater = build_updater(&app)?;
+    let updater = build_updater(&app).await?;
     let update = updater
         .check()
         .await

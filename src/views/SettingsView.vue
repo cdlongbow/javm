@@ -55,7 +55,7 @@ import {
 import { Textarea } from '@/components/ui/textarea'
 import AIConfigDialog from '@/components/AIConfigDialog.vue'
 import { selectDirectory } from '@/lib/tauri'
-import { THEME_OPTIONS, VIEW_MODE_OPTIONS, COVER_TYPE_OPTIONS } from '@/utils/constants'
+import { THEME_OPTIONS, VIEW_MODE_OPTIONS, COVER_TYPE_OPTIONS, UPDATE_CHANNEL_OPTIONS, METADATA_STORAGE_MODE_OPTIONS } from '@/utils/constants'
 import type { AIProvider, ViewMode } from '@/types'
 
 const route = useRoute()
@@ -102,6 +102,28 @@ async function restartMetatube() {
 function saveMetatube(patch: Partial<import('@/types').MetaTubeSettings>) {
   settingsStore.updateSettings({ metatube: { ...settingsStore.settings.metatube, ...patch } })
 }
+
+// ===== 元数据存储 =====
+const metadataModeDesc = computed(() => {
+  const mode = settingsStore.settings.metadata?.storageMode || 'follow_video'
+  return METADATA_STORAGE_MODE_OPTIONS.find((opt) => opt.value === mode)?.desc
+    ?? '选择 NFO 与图片的保存位置'
+})
+
+function saveMetadata(patch: Partial<import('@/types').MetadataSettings>) {
+  settingsStore.updateSettings({ metadata: { ...settingsStore.settings.metadata, ...patch } })
+}
+
+const selectMetadataRootDir = async () => {
+  try {
+    const path = await selectDirectory()
+    if (path) {
+      saveMetadata({ rootDir: path })
+    }
+  } catch (e) {
+    console.error('选择元数据根目录失败:', e)
+  }
+}
 const exportingLogs = ref(false)
 
 const updateStatusText = computed(() => {
@@ -120,6 +142,12 @@ const updateStatusText = computed(() => {
   }
 
   return '当前已是最新版本。'
+})
+
+const updateChannelDesc = computed(() => {
+  const channel = settingsStore.settings.update?.channel || 'stable'
+  return UPDATE_CHANNEL_OPTIONS.find((opt) => opt.value === channel)?.desc
+    ?? '选择接收哪类版本的更新'
 })
 
 const openExternalLink = async (url: string) => {
@@ -1007,6 +1035,50 @@ watch(() => settingsStore.settings, async (newSettings) => {
               </CardContent>
             </Card>
 
+            <!-- 元数据存储 -->
+            <Card>
+              <CardHeader>
+                <CardTitle>元数据存储</CardTitle>
+                <CardDescription>选择 NFO 与图片的保存位置；独立目录模式按「番号 标题」分子目录并生成 .strm，便于外部媒体库（Emby/Kodi/Jellyfin）统一管理</CardDescription>
+              </CardHeader>
+              <CardContent class="space-y-6">
+                <!-- 存储模式 -->
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <p class="font-medium">存储模式</p>
+                    <p class="text-sm text-muted-foreground">{{ metadataModeDesc }}</p>
+                  </div>
+                  <Select :model-value="settingsStore.settings.metadata?.storageMode || 'follow_video'"
+                    @update:model-value="(v) => saveMetadata({ storageMode: String(v) as import('@/types').MetadataStorageMode })">
+                    <SelectTrigger class="w-40">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="opt in METADATA_STORAGE_MODE_OPTIONS" :key="opt.value" :value="opt.value">
+                        {{ opt.label }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <!-- 元数据根目录（仅独立目录模式） -->
+                <template v-if="(settingsStore.settings.metadata?.storageMode || 'follow_video') === 'independent'">
+                  <Separator />
+                  <div class="space-y-2">
+                    <p class="font-medium">元数据根目录</p>
+                    <p class="text-sm text-muted-foreground">NFO 与图片将集中保存到此目录下，按「番号 标题」分子目录；视频本体留在原处不动</p>
+                    <div class="flex gap-2">
+                      <Input :model-value="settingsStore.settings.metadata?.rootDir || ''" placeholder="选择元数据根目录..." readonly class="flex-1" />
+                      <Button variant="outline" @click="selectMetadataRootDir">浏览</Button>
+                    </div>
+                    <p v-if="!(settingsStore.settings.metadata?.rootDir || '').trim()" class="text-xs text-destructive">
+                      未设置根目录时仍按「跟随视频」保存
+                    </p>
+                  </div>
+                </template>
+              </CardContent>
+            </Card>
+
             <!-- 反爬工具箱 -->
             <Card>
               <CardHeader>
@@ -1337,6 +1409,28 @@ watch(() => settingsStore.settings, async (newSettings) => {
                       {{ updaterStore.installing ? '安装中...' : '立即更新' }}
                     </Button>
                   </div>
+
+                  <!-- 更新通道 -->
+                  <div class="flex items-center justify-between pt-1">
+                    <div>
+                      <p class="font-medium">更新通道</p>
+                      <p class="text-sm text-muted-foreground">{{ updateChannelDesc }}</p>
+                    </div>
+                    <Select :model-value="settingsStore.settings.update?.channel || 'stable'"
+                      @update:model-value="(v) => settingsStore.updateSettings({ update: { ...settingsStore.settings.update, channel: String(v) as import('@/types').UpdateChannel } })">
+                      <SelectTrigger class="w-44">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="opt in UPDATE_CHANNEL_OPTIONS" :key="opt.value" :value="opt.value">
+                          {{ opt.label }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <p class="text-xs text-muted-foreground">
+                    从预发布通道切回「正式版」后，需等到更高的正式版发布才会再提示更新（当前预发布版不会被「降级」覆盖）。
+                  </p>
                 </div>
 
                 <Separator />
