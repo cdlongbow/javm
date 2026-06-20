@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
+import { useRouter } from 'vue-router'
 import { toImageSrc, resolveCoverImage } from '@/utils/image'
 import { openImagePreview, isFancyboxOpen } from '@/composables/useImagePreview'
 import { usePreviewGallery } from '@/composables/usePreviewGallery'
@@ -39,7 +40,8 @@ import {
     MoreHorizontal,
     Trash2,
     Download,
-    ShieldAlert
+    ShieldAlert,
+    Link as LinkIcon
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import type { Video } from '@/types'
@@ -56,6 +58,8 @@ import MagnetList from './MagnetList.vue'
 interface Props {
     open: boolean
     video: Video | null
+    /** 打开后自动刮削（用于「缺失作品」预览：传入只有番号的合成视频，开即刮） */
+    autoScrape?: boolean
 }
 
 interface VideoPreviewSource {
@@ -73,6 +77,7 @@ const emit = defineEmits<{
 const videoStore = useVideoStore()
 const scrapeStore = useResourceScrapeStore()
 const settingsStore = useSettingsStore()
+const router = useRouter()
 
 // Local state for editing
 const formData = ref<Partial<Video>>({})
@@ -204,6 +209,11 @@ watch(() => props.video, (newVal) => {
         // 如果有标题但没有番号，自动使用正则识别
         if ((newVal.originalTitle || newVal.title) && !newVal.localId) {
             autoRecognizeLocalId()
+        }
+
+        // 「缺失作品」预览：开即自动刮削（只需番号）
+        if (props.autoScrape && newVal.localId?.trim()) {
+            nextTick(() => handleScrape())
         }
     }
 }, { immediate: true })
@@ -467,8 +477,26 @@ function resolveScrapedDuration(existingDuration?: number, scrapedDuration?: str
 
 // handleScrapeResponse 已移除 — 新架构通过 store 流式搜索，不再需要旧的响应处理
 
+// 跳到「资源链接」界面查找该番号的视频链接
+const jumpToResourceLinks = () => {
+    const code = formData.value.localId?.trim()?.toUpperCase()
+    if (!code) {
+        toast.error('请先填写番号')
+        return
+    }
+    sessionStorage.setItem('rsPendingCode', code)
+    isOpen.value = false
+    router.push('/resource-scrape')
+}
+
 const handleSave = async () => {
     if (!props.video) return
+
+    // 「缺失作品」无库内记录（无 id），不能保存——它是预览用，靠磁力/资源链接获取后才入库
+    if (!props.video.id) {
+        toast.info('该作品不在库中，无法保存；可用下方磁力 / 资源链接获取')
+        return
+    }
 
     if (!isTitleValid.value) {
         toast.error('保存失败', {
@@ -1112,6 +1140,11 @@ const downloadLongScreenshot = async () => {
                             <!-- 磁力链接 -->
                             <div class="pt-3 border-t">
                                 <MagnetList :code="formData.localId" />
+                                <Button variant="outline" size="sm" class="mt-2 h-7 gap-1 text-xs"
+                                    :disabled="!formData.localId?.trim()" @click="jumpToResourceLinks">
+                                    <LinkIcon class="size-3.5" />
+                                    获取视频链接
+                                </Button>
                             </div>
 
                         </div>

@@ -16,6 +16,7 @@ interface Props {
 const props = defineProps<Props>()
 const emit = defineEmits<{
     (e: 'open-video', videoId: string): void
+    (e: 'open-missing', payload: { code: string; title: string }): void
     (e: 'refreshed'): void
 }>()
 
@@ -160,6 +161,7 @@ const displayCards = computed<Card[]>(() => {
 
 const onCardClick = (c: Card) => {
     if (c.videoId) emit('open-video', c.videoId)
+    else if (c.code) emit('open-missing', { code: c.code, title: c.title })
 }
 
 // 作品卡片大小（网格 min 列宽 px），拖拽条控制并记忆到 localStorage
@@ -277,7 +279,7 @@ const onCoverError = (e: Event, code: string) => {
                     v-for="c in displayCards"
                     :key="c.key"
                     class="group"
-                    :class="c.videoId ? 'cursor-pointer' : ''"
+                    :class="c.videoId || c.code ? 'cursor-pointer' : ''"
                     @click="onCardClick(c)"
                 >
                     <div class="relative aspect-[3/2] overflow-hidden rounded-md bg-muted">

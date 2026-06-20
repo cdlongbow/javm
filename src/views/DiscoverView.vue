@@ -106,10 +106,27 @@ const detailVideos = computed<Video[]>(() => {
 // 视频详情 / 刮削
 const detailDialogOpen = ref(false)
 const selectedVideo = ref<Video | null>(null)
+const detailAutoScrape = ref(false) // 缺失作品：开即自动刮削
 const scrapeDialogRef = ref<InstanceType<typeof ScrapeDialog> | null>(null)
 
 const handleVideoSelect = (video: Video) => {
+    detailAutoScrape.value = false
     selectedVideo.value = video
+    detailDialogOpen.value = true
+}
+// 缺失作品卡：用只含番号的合成视频开详情，自动刮削，靠磁力/资源链接获取
+const openMissing = (payload: { code: string; title: string }) => {
+    detailAutoScrape.value = true
+    selectedVideo.value = {
+        id: '',
+        localId: payload.code,
+        title: payload.title || payload.code,
+        originalTitle: payload.code,
+        videoPath: '',
+        scanStatus: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+    } as Video
     detailDialogOpen.value = true
 }
 const handleVideoUpdated = (video: Video) => {
@@ -212,6 +229,7 @@ const openVideoById = (videoId: string) => {
                 :actor-name="selectedValue!"
                 :local-videos="detailVideos"
                 @open-video="openVideoById"
+                @open-missing="openMissing"
                 @refreshed="fetchActors"
             />
             <div v-else class="flex-1 overflow-hidden py-4">
@@ -222,6 +240,7 @@ const openVideoById = (videoId: string) => {
         <VideoDetailDialog
             v-model:open="detailDialogOpen"
             :video="selectedVideo"
+            :auto-scrape="detailAutoScrape"
             @video-updated="handleVideoUpdated"
         />
         <ScrapeDialog ref="scrapeDialogRef" @success="videoStore.fetchVideos()" />

@@ -321,6 +321,12 @@ const activeTab = ref('search')
 
 onMounted(async () => {
   store.fetchTasks()
+  // 从详情页「获取视频链接」跳转而来：自动进资源链接 Tab 并搜索该番号
+  const pending = sessionStorage.getItem('rsPendingCode')
+  if (pending) {
+    sessionStorage.removeItem('rsPendingCode')
+    nextTick(() => handleFindLinks(pending))
+  }
 })
 </script>
 
