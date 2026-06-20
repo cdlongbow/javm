@@ -321,6 +321,8 @@ pub fn run() {
             video::commands::get_actors,
             actor::commands::fetch_actor_profile,
             actor::commands::get_actor_detail,
+            actor::commands::fetch_facet_works,
+            actor::commands::get_facet_detail,
             video::commands::backfill_cover_dimensions,
             video::commands::get_duplicate_videos,
             video::commands::delete_video_db,

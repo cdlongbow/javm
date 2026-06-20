@@ -31,6 +31,40 @@ pub fn build_star_url(star_code: &str, page: u32) -> String {
     }
 }
 
+/// 维度（片商/系列/导演）列表页 URL：`/{facet_type}/{source_id}` (+ `/{page}`)。
+/// `facet_type` 直接作路径段（studio/series/director，与站点一致）。
+pub fn build_facet_url(facet_type: &str, source_id: &str, page: u32) -> String {
+    if page <= 1 {
+        format!("{}/{}/{}", HOST, facet_type, source_id)
+    } else {
+        format!("{}/{}/{}/{}", HOST, facet_type, source_id, page)
+    }
+}
+
+/// 从影片详情页解析某维度在数据源的 id（`.info` 内 `<a href="/{facet_type}/{id}">`）。
+pub fn parse_facet_source_id(detail_html: &str, facet_type: &str) -> Option<String> {
+    let doc = Html::parse_document(detail_html);
+    let needle = format!("/{}/", facet_type);
+    let sel = Selector::parse(".info a[href]").ok()?;
+    for a in doc.select(&sel) {
+        let href = match a.value().attr("href") {
+            Some(h) => h,
+            None => continue,
+        };
+        if let Some(pos) = href.find(&needle) {
+            let id = href[pos + needle.len()..]
+                .split(['/', '?', '#'])
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// 按演员名搜索的 URL（`/searchstar/{name}`，路径段百分号编码以支持日文名）。
 pub fn build_search_url(name: &str) -> String {
     match url::Url::parse(&format!("{HOST}/")) {
@@ -263,5 +297,24 @@ mod tests {
         let last = r#"<ul class="pagination"><li class="active"><a>3</a></li></ul>"#;
         assert!(parse_has_next_page(with_next));
         assert!(!parse_has_next_page(last));
+    }
+
+    #[test]
+    fn builds_facet_url() {
+        assert_eq!(build_facet_url("studio", "2xs", 1), "https://www.javbus.com/studio/2xs");
+        assert_eq!(build_facet_url("series", "abc", 3), "https://www.javbus.com/series/abc/3");
+    }
+
+    #[test]
+    fn parses_facet_source_id() {
+        let html = r#"<div class="info">
+            <p><span class="header">製作商:</span><a href="/studio/2xs">S1</a></p>
+            <p><span>系列:</span><a href="https://www.javbus.com/series/9kx">系列A</a></p>
+            <p><a href="/director/3dd">导演A</a></p>
+        </div>"#;
+        assert_eq!(parse_facet_source_id(html, "studio").as_deref(), Some("2xs"));
+        assert_eq!(parse_facet_source_id(html, "series").as_deref(), Some("9kx"));
+        assert_eq!(parse_facet_source_id(html, "director").as_deref(), Some("3dd"));
+        assert_eq!(parse_facet_source_id(html, "label"), None);
     }
 }

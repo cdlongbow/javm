@@ -462,6 +462,31 @@ impl Database {
             [],
         )?;
 
+        // 维度作品全集表（片商/系列/导演通用，facet_type 区分；与 actor_works 同构）
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS facet_works (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                facet_type TEXT NOT NULL,
+                facet_id INTEGER NOT NULL,
+                code TEXT NOT NULL,
+                title TEXT,
+                cover_url TEXT,
+                release_date TEXT,
+                source TEXT,
+                local_video_id TEXT REFERENCES videos(id) ON DELETE SET NULL,
+                status TEXT NOT NULL DEFAULT 'missing',
+                is_uncensored INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (facet_type, facet_id, code)
+            )",
+            [],
+        )?;
+        // 维度表缓存其在数据源的 id（如 javbus `/studio/{id}`），用于抓全集
+        for t in ["studios", "series", "directors"] {
+            let _ = conn.execute(&format!("ALTER TABLE {} ADD COLUMN source_id TEXT", t), []);
+        }
+
         // 4. 下载表
         // 状态码: 0=排队 1=准备 2=下载中 3=合并 4=刮削中 5=暂停 6=完成 7=失败 8=重试 9=取消
         log::info!("[db] event=create_downloads_table_started");
@@ -562,6 +587,10 @@ impl Database {
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_actor_works_code ON actor_works (code)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_facet_works_facet ON facet_works (facet_type, facet_id)",
             [],
         )?;
 
@@ -716,6 +745,125 @@ impl Database {
             params![actor_id],
         )?;
         Ok(affected)
+    }
+
+    // ==================== 维度（片商/系列/导演）作品全集 ====================
+
+    /// 维度类型 → (维度表, 关联表, 关联列)。白名单，防注入；非法类型返回 None。
+    fn facet_tables(facet_type: &str) -> Option<(&'static str, &'static str, &'static str)> {
+        match facet_type {
+            "studio" => Some(("studios", "video_studios", "studio_id")),
+            "series" => Some(("series", "video_series", "series_id")),
+            "director" => Some(("directors", "video_directors", "director_id")),
+            _ => None,
+        }
+    }
+
+    /// 写入/更新维度作品全集中的一部作品（按 `UNIQUE(facet_type, facet_id, code)` 幂等，COALESCE 多源补全）。
+    pub fn upsert_facet_work(conn: &Connection, w: &FacetWorkInput) -> Result<()> {
+        conn.execute(
+            "INSERT INTO facet_works
+                (facet_type, facet_id, code, title, cover_url, release_date, source, is_uncensored, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP)
+             ON CONFLICT(facet_type, facet_id, code) DO UPDATE SET
+                title = COALESCE(excluded.title, facet_works.title),
+                cover_url = COALESCE(excluded.cover_url, facet_works.cover_url),
+                release_date = COALESCE(excluded.release_date, facet_works.release_date),
+                source = COALESCE(excluded.source, facet_works.source),
+                is_uncensored = excluded.is_uncensored,
+                updated_at = CURRENT_TIMESTAMP",
+            params![
+                w.facet_type,
+                w.facet_id,
+                w.code,
+                w.title,
+                w.cover_url,
+                w.release_date,
+                w.source,
+                w.is_uncensored as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 维度作品全集与本地库按番号匹配（同 `relink_actor_works_local`，按 facet 维度）。
+    pub fn relink_facet_works_local(
+        conn: &Connection,
+        facet_type: &str,
+        facet_id: i64,
+    ) -> Result<usize> {
+        let affected = conn.execute(
+            "UPDATE facet_works
+             SET local_video_id = (
+                     SELECT v.id FROM videos v
+                     WHERE UPPER(TRIM(v.local_id)) = UPPER(TRIM(facet_works.code)) LIMIT 1
+                 ),
+                 status = CASE WHEN EXISTS (
+                     SELECT 1 FROM videos v
+                     WHERE UPPER(TRIM(v.local_id)) = UPPER(TRIM(facet_works.code))
+                 ) THEN 'local' ELSE 'missing' END,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE facet_type = ?1 AND facet_id = ?2 AND status IN ('local', 'missing')",
+            params![facet_type, facet_id],
+        )?;
+        Ok(affected)
+    }
+
+    /// 缓存维度在数据源的 id（如 javbus `/studio/{id}`）。
+    pub fn set_facet_source_id(
+        conn: &Connection,
+        facet_type: &str,
+        facet_id: i64,
+        source_id: &str,
+    ) -> Result<()> {
+        let (table, _, _) = Self::facet_tables(facet_type)
+            .ok_or_else(|| rusqlite::Error::InvalidParameterName(facet_type.to_string()))?;
+        conn.execute(
+            &format!("UPDATE {} SET source_id = ?2 WHERE id = ?1", table),
+            params![facet_id, source_id],
+        )?;
+        Ok(())
+    }
+
+    /// 读取维度已缓存的数据源 id。
+    pub fn get_facet_source_id(
+        conn: &Connection,
+        facet_type: &str,
+        facet_id: i64,
+    ) -> Result<Option<String>> {
+        let (table, _, _) = Self::facet_tables(facet_type)
+            .ok_or_else(|| rusqlite::Error::InvalidParameterName(facet_type.to_string()))?;
+        conn.query_row(
+            &format!("SELECT source_id FROM {} WHERE id = ?", table),
+            params![facet_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map(|opt| opt.flatten())
+    }
+
+    /// 找该维度下任一本地视频的番号（用于刮其详情页解析维度的数据源 id）。
+    pub fn find_local_code_for_facet(
+        conn: &Connection,
+        facet_type: &str,
+        facet_id: i64,
+    ) -> Result<Option<String>> {
+        let (_, rel_table, rel_col) = Self::facet_tables(facet_type)
+            .ok_or_else(|| rusqlite::Error::InvalidParameterName(facet_type.to_string()))?;
+        conn.query_row(
+            &format!(
+                "SELECT v.local_id FROM videos v
+                 JOIN {rel} r ON r.video_id = v.id
+                 WHERE r.{col} = ?1 AND v.local_id IS NOT NULL AND TRIM(v.local_id) <> ''
+                 LIMIT 1",
+                rel = rel_table,
+                col = rel_col
+            ),
+            params![facet_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map(|opt| opt.flatten())
     }
 
     /// 用详情页抓取的头像信息补全演员档案（仅当演员已存在，按名匹配）。

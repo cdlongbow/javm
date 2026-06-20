@@ -19,6 +19,7 @@ import VirtualGrid from '@/components/VirtualGrid.vue'
 import VideoDetailDialog from '@/components/VideoDetailDialog.vue'
 import ScrapeDialog from '@/components/ScrapeDialog.vue'
 import ActorDetailPanel from '@/components/ActorDetailPanel.vue'
+import FacetDetailPanel from '@/components/FacetDetailPanel.vue'
 import { useVideoStore } from '@/stores'
 import type { Video } from '@/types'
 import { FACET_TYPES, type FacetType, facetValuesOf, aggregateFacet } from '@/utils/facet'
@@ -54,7 +55,7 @@ const hideBrokenImg = (e: Event) => {
     ;(e.target as HTMLImageElement).style.display = 'none'
 }
 
-const facetType = ref<FacetType>('studio')
+const facetType = ref<FacetType>('actor')
 const selectedValue = ref<string | null>(null)
 const search = ref('')
 const sortByCount = ref(true) // true=按作品数, false=按名称
@@ -221,7 +222,7 @@ const openVideoById = (videoId: string) => {
                 <span v-if="facetType !== 'actor'" class="text-xs text-muted-foreground">{{ detailVideos.length }} 部</span>
             </div>
 
-            <!-- 演员：档案 + 作品全集（本地有/缺失）；其它分面：本地作品网格 -->
+            <!-- 演员：档案 + 全集；片商/系列/导演：全集；分类：本地网格 -->
             <ActorDetailPanel
                 v-if="facetType === 'actor'"
                 class="min-h-0 flex-1"
@@ -231,6 +232,15 @@ const openVideoById = (videoId: string) => {
                 @open-video="openVideoById"
                 @open-missing="openMissing"
                 @refreshed="fetchActors"
+            />
+            <FacetDetailPanel
+                v-else-if="facetType === 'studio' || facetType === 'series' || facetType === 'director'"
+                class="min-h-0 flex-1"
+                :facet-type="facetType"
+                :facet-name="selectedValue!"
+                :local-videos="detailVideos"
+                @open-video="openVideoById"
+                @open-missing="openMissing"
             />
             <div v-else class="flex-1 overflow-hidden py-4">
                 <VirtualGrid :items="detailVideos" @select="handleVideoSelect" @scrape="handleScrape" />

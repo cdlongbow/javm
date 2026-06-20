@@ -12,29 +12,17 @@ import { useSettingsStore } from '@/stores'
 const settingsStore = useSettingsStore()
 
 interface Props {
-    actorId: number | null
-    actorName: string
+    facetType: 'studio' | 'series' | 'director'
+    facetName: string
     localVideos: Video[]
 }
 const props = defineProps<Props>()
 const emit = defineEmits<{
     (e: 'open-video', videoId: string): void
     (e: 'open-missing', payload: { code: string; title: string }): void
-    (e: 'refreshed'): void
 }>()
 
-interface ActorProfile {
-    avatarPath?: string | null
-    avatarUrl?: string | null
-    birthday?: string | null
-    height?: number | null
-    cup?: string | null
-    bust?: number | null
-    waist?: number | null
-    hip?: number | null
-    workCount?: number | null
-}
-interface ActorWork {
+interface FacetWork {
     code: string
     title?: string | null
     coverUrl?: string | null
@@ -44,34 +32,28 @@ interface ActorWork {
     isUncensored: boolean
 }
 
-const profile = ref<ActorProfile | null>(null)
-const works = ref<ActorWork[]>([])
+const works = ref<FacetWork[]>([])
 const loading = ref(false)
 const fetching = ref(false)
 const activeTab = ref<'all' | 'local' | 'missing'>('all')
 
 const loadDetail = async () => {
-    if (!props.actorId) {
-        profile.value = null
-        works.value = []
-        return
-    }
     loading.value = true
     try {
-        const res = await invoke<{ profile: ActorProfile; works: ActorWork[] }>('get_actor_detail', {
-            actorId: props.actorId,
+        const res = await invoke<{ works: FacetWork[] }>('get_facet_detail', {
+            facetType: props.facetType,
+            facetName: props.facetName,
         })
-        profile.value = res.profile
         works.value = res.works ?? []
     } catch (e) {
-        console.error('获取演员详情失败:', e)
+        console.error('获取维度详情失败:', e)
     } finally {
         loading.value = false
     }
 }
 
 watch(
-    () => props.actorId,
+    () => [props.facetType, props.facetName],
     () => {
         activeTab.value = 'all'
         loadDetail()
@@ -79,19 +61,18 @@ watch(
     { immediate: true },
 )
 
-const fetchProfile = async () => {
-    if (!props.actorId || fetching.value) return
+const fetchWorks = async () => {
+    if (fetching.value) return
     fetching.value = true
     try {
-        const r = await invoke<{ profileUpdated: boolean; worksTotal: number; worksLocal: number }>(
-            'fetch_actor_profile',
-            { actorId: props.actorId },
-        )
+        const r = await invoke<{ worksTotal: number; worksLocal: number }>('fetch_facet_works', {
+            facetType: props.facetType,
+            facetName: props.facetName,
+        })
         toast.success(`已抓取：${r.worksTotal} 部作品，本地 ${r.worksLocal} 部`)
         await loadDetail()
-        emit('refreshed')
     } catch (e) {
-        console.error('抓取演员档案失败:', e)
+        console.error('抓取全集失败:', e)
         toast.error('抓取失败: ' + String(e))
     } finally {
         fetching.value = false
@@ -101,26 +82,22 @@ const fetchProfile = async () => {
 const hasWorks = computed(() => works.value.length > 0)
 const localCount = computed(() => works.value.filter((w) => w.status === 'local').length)
 const missingCount = computed(() => works.value.filter((w) => w.status !== 'local').length)
-// 是否已抓取过（已落库）：有作品，或档案已有资料 → 按钮显示「重新抓取」
-const hasFetched = computed(
-    () =>
-        hasWorks.value ||
-        !!(profile.value && (profile.value.birthday || profile.value.height || profile.value.cup)),
+
+// 卡片大小（与演员面板共用一个设置）
+const cardSize = ref(settingsStore.settings.general.actorCardSize || 160)
+watch(
+    () => settingsStore.settings.general.actorCardSize,
+    (v) => {
+        if (v && v !== cardSize.value) cardSize.value = v
+    },
 )
-
-const avatarSrc = computed<string | null>(() => {
-    const p = profile.value
-    if (p?.avatarPath) return convertFileSrc(p.avatarPath)
-    if (p?.avatarUrl) return p.avatarUrl
-    return null
-})
-
-const measurements = computed(() => {
-    const p = profile.value
-    if (!p) return null
-    if (p.bust && p.waist && p.hip) return `${p.bust} / ${p.waist} / ${p.hip}`
-    return null
-})
+const persistCardSize = () => {
+    if (cardSize.value !== settingsStore.settings.general.actorCardSize) {
+        settingsStore.updateSettings({
+            general: { ...settingsStore.settings.general, actorCardSize: cardSize.value },
+        })
+    }
+}
 
 const coverOf = (v: Video): string | null => {
     const path = v.fanart || v.poster || v.thumb
@@ -136,7 +113,6 @@ interface Card {
     videoId: string | null
 }
 
-// 已抓全集 → 显示全集（可切 Tab）；未抓 → 显示本地作品（来自媒体库）
 const displayCards = computed<Card[]>(() => {
     if (hasWorks.value) {
         let ws = works.value
@@ -144,7 +120,6 @@ const displayCards = computed<Card[]>(() => {
         else if (activeTab.value === 'missing') ws = ws.filter((w) => w.status !== 'local')
         return ws.map((w) => ({
             key: w.code,
-            // 无封面 → 用番号直拼 DMM 官方封面兜底（覆盖有码主流）
             coverSrc: w.coverUrl || dmmCoverUrl(w.code),
             code: w.code,
             title: w.title || '',
@@ -166,29 +141,6 @@ const onCardClick = (c: Card) => {
     if (c.videoId) emit('open-video', c.videoId)
     else if (c.code) emit('open-missing', { code: c.code, title: c.title })
 }
-
-// 作品卡片大小（网格 min 列宽 px）：持久化到设置（disk，重启保留）。
-// 拖动过程用本地 ref 平滑更新网格，松手(@change)才写一次设置，避免频繁写配置。
-const cardSize = ref(settingsStore.settings.general.actorCardSize || 160)
-watch(
-    () => settingsStore.settings.general.actorCardSize,
-    (v) => {
-        if (v && v !== cardSize.value) cardSize.value = v
-    },
-)
-const persistCardSize = () => {
-    if (cardSize.value !== settingsStore.settings.general.actorCardSize) {
-        settingsStore.updateSettings({
-            general: { ...settingsStore.settings.general, actorCardSize: cardSize.value },
-        })
-    }
-}
-const hideBrokenImg = (e: Event) => {
-    ;(e.target as HTMLImageElement).style.visibility = 'hidden'
-}
-
-// 作品封面加载失败 → 依次尝试 DMM digital → mono → 隐藏。
-// 能正常加载的(已有封面)不会触发，等于「已有的跳过」。WebView 自带 HTTP 缓存。
 const onCoverError = (e: Event, code: string) => {
     const img = e.target as HTMLImageElement
     const cur = img.getAttribute('src') || ''
@@ -208,44 +160,26 @@ const onCoverError = (e: Event, code: string) => {
 
 <template>
     <div class="flex h-full flex-col">
-        <!-- 档案卡 -->
-        <div class="flex gap-4 border-b p-4">
-            <div class="size-24 shrink-0 overflow-hidden rounded-lg bg-muted">
-                <img
-                    v-if="avatarSrc"
-                    :src="avatarSrc"
-                    referrerpolicy="no-referrer"
-                    class="size-full object-cover"
-                    @error="hideBrokenImg"
-                />
-            </div>
+        <!-- 头部：名称 + 计数 + 抓取全集 -->
+        <div class="flex items-center gap-3 border-b p-4">
             <div class="min-w-0 flex-1">
-                <div class="text-lg font-semibold">{{ actorName }}</div>
-                <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
-                    <span v-if="profile?.birthday">生日 {{ profile.birthday }}</span>
-                    <span v-if="profile?.height">身高 {{ profile.height }}cm</span>
-                    <span v-if="profile?.cup">罩杯 {{ profile.cup }}</span>
-                    <span v-if="measurements">三围 {{ measurements }}</span>
-                </div>
-                <div class="mt-2 text-sm text-muted-foreground">
+                <div class="truncate text-lg font-semibold">{{ facetName }}</div>
+                <div class="mt-0.5 text-sm text-muted-foreground">
                     <template v-if="hasWorks">
                         全集 {{ works.length }} 部 · 本地 {{ localCount }} · 缺失 {{ missingCount }}
                     </template>
-                    <template v-else> 本地 {{ localVideos.length }} 部（未抓取全集） </template>
+                    <template v-else>本地 {{ localVideos.length }} 部（未抓取全集）</template>
                 </div>
-                <Button size="sm" class="mt-2 gap-1" :disabled="fetching || !actorId" @click="fetchProfile">
-                    <Loader2 v-if="fetching" class="size-4 animate-spin" />
-                    <Download v-else class="size-4" />
-                    {{ fetching ? '抓取中…' : hasFetched ? '重新抓取' : '抓取档案 / 全集' }}
-                </Button>
             </div>
+            <Button size="sm" class="gap-1" :disabled="fetching" @click="fetchWorks">
+                <Loader2 v-if="fetching" class="size-4 animate-spin" />
+                <Download v-else class="size-4" />
+                {{ fetching ? '抓取中…' : hasWorks ? '重新抓取' : '抓取全集' }}
+            </Button>
         </div>
 
-        <!-- 作品 Tab + 卡片大小拖拽条 -->
-        <div
-            v-if="hasWorks || localVideos.length"
-            class="flex items-center gap-1 border-b px-4 py-2"
-        >
+        <!-- Tab + 卡片大小 -->
+        <div v-if="hasWorks || localVideos.length" class="flex items-center gap-1 border-b px-4 py-2">
             <template v-if="hasWorks">
                 <Button
                     v-for="t in (['all', 'local', 'missing'] as const)"
@@ -275,17 +209,14 @@ const onCoverError = (e: Event, code: string) => {
 
         <!-- 作品网格 -->
         <ScrollArea class="min-h-0 flex-1">
-            <div
-                v-if="loading"
-                class="flex items-center justify-center py-12 text-muted-foreground"
-            >
+            <div v-if="loading" class="flex items-center justify-center py-12 text-muted-foreground">
                 <Loader2 class="size-6 animate-spin" />
             </div>
             <div
                 v-else-if="displayCards.length === 0"
                 class="flex items-center justify-center py-12 text-sm text-muted-foreground"
             >
-                暂无作品，点击「抓取档案 / 全集」获取
+                暂无作品，点击「抓取全集」获取
             </div>
             <div
                 v-else

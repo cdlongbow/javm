@@ -3,7 +3,7 @@
 use tauri::{AppHandle, Manager, State};
 use tokio_util::sync::CancellationToken;
 
-use crate::db::{ActorWorkInput, Database};
+use crate::db::{ActorWorkInput, Database, FacetWorkInput, MetadataTable};
 use crate::error::{AppError, AppResult};
 use crate::resource_scrape::actor_provider;
 use crate::resource_scrape::fetcher::{FetchOptions, Fetcher};
@@ -288,6 +288,193 @@ pub async fn get_actor_detail(
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(serde_json::json!({ "profile": profile, "works": works }))
+    })
+    .await
+    .map_err(|e| AppError::TaskJoin(e.to_string()))?
+}
+
+// ==================== 维度（片商/系列/导演）作品全集 ====================
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FacetFetchResult {
+    pub works_total: usize,
+    pub works_local: i64,
+}
+
+fn facet_metadata_table(facet_type: &str) -> Option<MetadataTable> {
+    match facet_type {
+        "studio" => Some(MetadataTable::Studios),
+        "series" => Some(MetadataTable::Series),
+        "director" => Some(MetadataTable::Directors),
+        _ => None,
+    }
+}
+
+/// 抓取某维度（片商/系列/导演）的作品全集：定位其数据源 id（缓存优先，否则刮该维度下任一本地番号的
+/// 详情页解析），分页爬全集 → 落库 + 本地匹配。经 Fetcher 过年龄门。
+#[tauri::command]
+pub async fn fetch_facet_works(
+    app: AppHandle,
+    facet_type: String,
+    facet_name: String,
+    db: State<'_, Database>,
+) -> AppResult<FacetFetchResult> {
+    let mt = facet_metadata_table(&facet_type)
+        .ok_or_else(|| AppError::Business("不支持的维度".to_string()))?;
+
+    let app_settings = settings::get_settings(app.clone()).await.unwrap_or_default();
+    let fetch_settings = settings::resolve_scrape_fetch_settings(&app_settings.scrape);
+    let options = FetchOptions {
+        webview_enabled: fetch_settings.webview_enabled,
+        webview_fallback_enabled: fetch_settings.webview_fallback_enabled,
+        show_webview: fetch_settings.dev_show_webview,
+        max_webview_windows: fetch_settings.max_webview_windows,
+    };
+    let site = ResourceSite {
+        id: "javbus".to_string(),
+        name: "javbus".to_string(),
+        enabled: true,
+        avg_score: None,
+        scrape_count: None,
+    };
+    let token = CancellationToken::new();
+    let fetcher = Fetcher::new();
+
+    // 1. 维度 id
+    let facet_id = {
+        let conn = db.get_connection()?;
+        Database::get_or_create_metadata(&conn, mt, facet_name.trim())?
+    };
+
+    // 2. 数据源 id：缓存优先，否则刮该维度下任一本地番号的详情页解析并缓存
+    let mut source_id = {
+        let conn = db.get_connection()?;
+        Database::get_facet_source_id(&conn, &facet_type, facet_id)?
+    };
+    if source_id.is_none() {
+        let code = {
+            let conn = db.get_connection()?;
+            Database::find_local_code_for_facet(&conn, &facet_type, facet_id)?
+        };
+        if let Some(code) = code {
+            let detail_url = format!("https://www.javbus.com/{}", code);
+            if let Ok(html) = fetcher.fetch(&app, &detail_url, &site, options, &token).await {
+                if let Some(sid) = actor_provider::parse_facet_source_id(&html, &facet_type) {
+                    let conn = db.get_connection()?;
+                    let _ = Database::set_facet_source_id(&conn, &facet_type, facet_id, &sid);
+                    source_id = Some(sid);
+                }
+            }
+        }
+    }
+    let source_id = source_id.ok_or_else(|| {
+        AppError::Business(format!("无法定位「{facet_name}」的数据源链接（需先刮削其下任一作品）"))
+    })?;
+
+    // 3. 分页抓全集
+    let mut works: Vec<actor_provider::StarWork> = Vec::new();
+    let mut page = 1u32;
+    loop {
+        let url = actor_provider::build_facet_url(&facet_type, &source_id, page);
+        let html = fetcher
+            .fetch(&app, &url, &site, options, &token)
+            .await
+            .map_err(AppError::Business)?;
+        let page_works = actor_provider::parse_works(&html);
+        let has_next = actor_provider::parse_has_next_page(&html);
+        if page_works.is_empty() {
+            break;
+        }
+        works.extend(page_works);
+        if !has_next || page >= MAX_STAR_PAGES {
+            break;
+        }
+        page += 1;
+    }
+
+    // 4. 落库
+    let works_total = works.len();
+    let db_inner = db.inner().clone();
+    let ft = facet_type.clone();
+    let works_local = tokio::task::spawn_blocking(move || -> AppResult<i64> {
+        let mut conn = db_inner.get_connection()?;
+        let tx = conn.transaction()?;
+        for w in &works {
+            let is_unc = designation_recognizer::is_uncensored_designation(&w.code);
+            Database::upsert_facet_work(
+                &tx,
+                &FacetWorkInput {
+                    facet_type: &ft,
+                    facet_id,
+                    code: &w.code,
+                    title: opt(&w.title),
+                    cover_url: opt(&w.cover_url),
+                    release_date: opt(&w.release_date),
+                    source: Some("javbus"),
+                    is_uncensored: is_unc,
+                },
+            )?;
+        }
+        Database::relink_facet_works_local(&tx, &ft, facet_id)?;
+        let local: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM facet_works WHERE facet_type = ?1 AND facet_id = ?2 AND status = 'local'",
+            rusqlite::params![&ft, facet_id],
+            |r| r.get(0),
+        )?;
+        tx.commit()?;
+        Ok(local)
+    })
+    .await
+    .map_err(|e| AppError::TaskJoin(e.to_string()))??;
+
+    Ok(FacetFetchResult { works_total, works_local })
+}
+
+/// 维度详情：作品全集（本地有/缺失）。供片商/系列/导演详情面板渲染。
+#[tauri::command]
+pub async fn get_facet_detail(
+    facet_type: String,
+    facet_name: String,
+    db: State<'_, Database>,
+) -> AppResult<serde_json::Value> {
+    let mt = facet_metadata_table(&facet_type)
+        .ok_or_else(|| AppError::Business("不支持的维度".to_string()))?;
+    let conn = db.get_connection()?;
+    let ft = facet_type.clone();
+    tokio::task::spawn_blocking(move || -> AppResult<serde_json::Value> {
+        use rusqlite::OptionalExtension;
+        let facet_id: Option<i64> = conn
+            .query_row(
+                &format!("SELECT id FROM {} WHERE name = ?", mt.as_str()),
+                rusqlite::params![facet_name.trim()],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        let works: Vec<serde_json::Value> = if let Some(fid) = facet_id {
+            let mut stmt = conn.prepare(
+                "SELECT code, title, cover_url, release_date, status, local_video_id, is_uncensored
+                 FROM facet_works WHERE facet_type = ?1 AND facet_id = ?2 ORDER BY release_date DESC",
+            )?;
+            let mapped = stmt.query_map(rusqlite::params![&ft, fid], |r| {
+                Ok(serde_json::json!({
+                    "code": r.get::<_, String>(0)?,
+                    "title": r.get::<_, Option<String>>(1)?,
+                    "coverUrl": r.get::<_, Option<String>>(2)?,
+                    "releaseDate": r.get::<_, Option<String>>(3)?,
+                    "status": r.get::<_, String>(4)?,
+                    "localVideoId": r.get::<_, Option<String>>(5)?,
+                    "isUncensored": r.get::<_, Option<i64>>(6)?.unwrap_or(0) != 0,
+                }))
+            })?;
+            let collected: rusqlite::Result<Vec<_>> = mapped.collect();
+            collected?
+        } else {
+            Vec::new()
+        };
+
+        Ok(serde_json::json!({ "works": works }))
     })
     .await
     .map_err(|e| AppError::TaskJoin(e.to_string()))?

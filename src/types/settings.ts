@@ -64,6 +64,8 @@ export interface GeneralSettings {
     playMethod: PlayMethod
     coverClickToPlay: boolean
     coverType: CoverType
+    /** 演员面板作品卡片大小（网格 min 列宽 px） */
+    actorCardSize: number
 }
 
 /** 下载源（资源链接视频站） */
@@ -206,6 +208,7 @@ export const defaultSettings: AppSettings = {
         playMethod: 'software',
         coverClickToPlay: true,
         coverType: 'landscape',
+        actorCardSize: 160,
     },
     download: {
         savePath: '',

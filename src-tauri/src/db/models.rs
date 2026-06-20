@@ -183,6 +183,18 @@ pub struct ActorWorkInput<'a> {
     pub is_uncensored: bool,
 }
 
+/// 维度（片商/系列/导演）作品全集写入入参。`facet_type` 为 'studio'|'series'|'director'。
+pub struct FacetWorkInput<'a> {
+    pub facet_type: &'a str,
+    pub facet_id: i64,
+    pub code: &'a str,
+    pub title: Option<&'a str>,
+    pub cover_url: Option<&'a str>,
+    pub release_date: Option<&'a str>,
+    pub source: Option<&'a str>,
+    pub is_uncensored: bool,
+}
+
 /// 演员档案写入入参（来自 star 页解析）。各字段 None 时 `update_actor_profile` 不覆盖已有值。
 #[derive(Debug, Default, Clone)]
 pub struct ActorProfileInput {

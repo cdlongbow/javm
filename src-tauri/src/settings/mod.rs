@@ -176,10 +176,17 @@ pub struct GeneralSettings {
     pub cover_click_to_play: bool,
     #[serde(rename = "coverType", default = "default_cover_type")]
     pub cover_type: String,
+    /// 演员面板作品卡片大小（网格 min 列宽 px）
+    #[serde(rename = "actorCardSize", default = "default_actor_card_size")]
+    pub actor_card_size: u32,
 }
 
 fn default_play_method() -> String {
     "software".to_string()
+}
+
+fn default_actor_card_size() -> u32 {
+    160
 }
 
 fn default_view_mode() -> String {
@@ -670,6 +677,7 @@ impl Default for AppSettings {
                 play_method: "software".to_string(),
                 cover_click_to_play: true,
                 cover_type: "landscape".to_string(),
+                actor_card_size: 160,
             },
             download: DownloadSettings::default(),
             scrape: ScrapeSettings::default(),

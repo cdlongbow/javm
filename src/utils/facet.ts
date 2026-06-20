@@ -8,12 +8,12 @@ export interface FacetTypeMeta {
     label: string
 }
 
-/** 顶部分面切换的维度集合 */
+/** 顶部分面切换的维度集合（演员在最前） */
 export const FACET_TYPES: FacetTypeMeta[] = [
+    { type: 'actor', label: '演员' },
     { type: 'studio', label: '片商' },
     { type: 'series', label: '系列' },
     { type: 'director', label: '导演' },
-    { type: 'actor', label: '演员' },
     { type: 'genre', label: '分类' },
 ]
 
