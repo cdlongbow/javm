@@ -63,6 +63,9 @@ watch(
     { immediate: true },
 )
 
+// 供父组件在缺失作品刮削落库后静默刷新网格（封面/标题即时更新）
+defineExpose({ reload: () => loadDetail(true) })
+
 const fetchWorks = async () => {
     if (fetching.value) return
     fetching.value = true

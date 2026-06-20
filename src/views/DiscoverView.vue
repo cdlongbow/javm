@@ -147,6 +147,14 @@ const openVideoById = (videoId: string) => {
     const v = videoStore.videos.find((x) => x.id === videoId)
     if (v) handleVideoSelect(v)
 }
+
+// 缺失作品刮削落库后：静默刷新当前面板，封面/标题即时更新
+const actorPanelRef = ref<InstanceType<typeof ActorDetailPanel> | null>(null)
+const facetPanelRef = ref<InstanceType<typeof FacetDetailPanel> | null>(null)
+const handleWorkMetaSaved = () => {
+    actorPanelRef.value?.reload()
+    facetPanelRef.value?.reload()
+}
 </script>
 
 <template>
@@ -225,6 +233,7 @@ const openVideoById = (videoId: string) => {
             <!-- 演员：档案 + 全集；片商/系列/导演：全集；分类：本地网格 -->
             <ActorDetailPanel
                 v-if="facetType === 'actor'"
+                ref="actorPanelRef"
                 class="min-h-0 flex-1"
                 :actor-id="selectedActorId"
                 :actor-name="selectedValue!"
@@ -235,6 +244,7 @@ const openVideoById = (videoId: string) => {
             />
             <FacetDetailPanel
                 v-else-if="facetType === 'studio' || facetType === 'series' || facetType === 'director'"
+                ref="facetPanelRef"
                 class="min-h-0 flex-1"
                 :facet-type="facetType"
                 :facet-name="selectedValue!"
@@ -252,6 +262,7 @@ const openVideoById = (videoId: string) => {
             :video="selectedVideo"
             :auto-scrape="detailAutoScrape"
             @video-updated="handleVideoUpdated"
+            @work-meta-saved="handleWorkMetaSaved"
         />
         <ScrapeDialog ref="scrapeDialogRef" @success="videoStore.fetchVideos()" />
     </div>

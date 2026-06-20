@@ -518,3 +518,16 @@ pub async fn get_facet_detail(
     .await
     .map_err(|e| AppError::TaskJoin(e.to_string()))?
 }
+
+/// 缺失作品预览刮削后：把标题/封面存回作品全集条目（actor_works + facet_works），关窗不丢。
+#[tauri::command]
+pub async fn save_scraped_work_meta(
+    code: String,
+    title: String,
+    cover_url: String,
+    db: State<'_, Database>,
+) -> AppResult<()> {
+    let conn = db.get_connection()?;
+    Database::save_scraped_work_meta(&conn, &code, &title, &cover_url)?;
+    Ok(())
+}

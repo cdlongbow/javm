@@ -866,6 +866,30 @@ impl Database {
         .map(|opt| opt.flatten())
     }
 
+    /// 把对某番号刮到的标题/封面存回作品全集条目（actor_works + facet_works，按番号大小写不敏感）。
+    /// 供「缺失作品」预览刮削后持久化——非空才覆盖，关窗也不丢。
+    pub fn save_scraped_work_meta(
+        conn: &Connection,
+        code: &str,
+        title: &str,
+        cover_url: &str,
+    ) -> Result<()> {
+        for table in ["actor_works", "facet_works"] {
+            conn.execute(
+                &format!(
+                    "UPDATE {} SET
+                        title = COALESCE(NULLIF(?2, ''), title),
+                        cover_url = COALESCE(NULLIF(?3, ''), cover_url),
+                        updated_at = CURRENT_TIMESTAMP
+                     WHERE UPPER(TRIM(code)) = UPPER(TRIM(?1))",
+                    table
+                ),
+                params![code, title, cover_url],
+            )?;
+        }
+        Ok(())
+    }
+
     /// 用详情页抓取的头像信息补全演员档案（仅当演员已存在，按名匹配）。
     ///
     /// `avatar_url` 非空才覆盖（旧值保留）；`star_code` 为字母数字时以 `{"javbus":"code"}` 存入 `star_codes`。

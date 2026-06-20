@@ -72,6 +72,7 @@ const props = defineProps<Props>()
 const emit = defineEmits<{
     (e: 'update:open', value: boolean): void
     (e: 'video-updated', value: Video): void
+    (e: 'work-meta-saved', code: string): void
 }>()
 
 const videoStore = useVideoStore()
@@ -126,6 +127,8 @@ const isOpen = computed({
 
 // 始终使用最新的视频路径（截取预览图后视频可能被迁移到同名目录）
 const currentVideoPath = computed(() => formData.value.videoPath || props.video?.videoPath || '')
+// 缺失作品（发现页合成卡）没有本地文件：播放/打开目录/删除/保存均无意义，屏蔽这些按钮
+const hasLocalFile = computed(() => !!props.video?.id && !!currentVideoPath.value)
 
 const normalizedTitle = computed(() => (formData.value.title || '').trim())
 
@@ -447,7 +450,23 @@ const handleScrape = async () => {
         isDirty.value = true
         isScraping.value = false
 
-        toast.success('刮削成功！请点击"保存修改"按钮保存数据')
+        // 缺失作品（不在库、无 id）没有可保存的库记录：把刮到的标题/封面存回作品全集条目，关窗不丢
+        if (!props.video?.id && localId) {
+            try {
+                await invoke('save_scraped_work_meta', {
+                    code: localId,
+                    title: best.title || '',
+                    coverUrl: best.remoteCoverUrl || best.coverUrl || '',
+                })
+                emit('work-meta-saved', localId)
+                toast.success('刮削完成，已保存到该作品（封面/标题）')
+            } catch (e) {
+                console.error('保存作品信息失败:', e)
+                toast.success('刮削成功')
+            }
+        } else {
+            toast.success('刮削成功！请点击"保存修改"按钮保存数据')
+        }
     } catch (e) {
         console.error('刮削失败:', e)
         toast.error('刮削失败: ' + String(e))
@@ -1161,8 +1180,8 @@ const downloadLongScreenshot = async () => {
                         </div>
 
                         <div class="flex items-center gap-3">
-                        <!-- 更多按钮（最左侧） -->
-                        <DropdownMenu>
+                        <!-- 更多按钮（最左侧）：仅本地视频可用（打开目录/删除） -->
+                        <DropdownMenu v-if="hasLocalFile">
                             <DropdownMenuTrigger as-child>
                                 <Button variant="outline" size="sm">
                                     <MoreHorizontal class="size-4" />
@@ -1187,7 +1206,7 @@ const downloadLongScreenshot = async () => {
                             {{ isScraping ? '刮削中...' : '重新刮削' }}
                         </Button>
 
-                        <Button :variant="hasScrapedData ? 'default' : 'outline'" size="sm" @click="handleSave"
+                        <Button v-if="hasLocalFile" :variant="hasScrapedData ? 'default' : 'outline'" size="sm" @click="handleSave"
                             :disabled="isSaving || !isTitleValid"
                             :class="hasScrapedData ? 'bg-white text-black hover:bg-white/90' : ''">
                             <Loader2 v-if="isSaving" class="mr-2 size-4 animate-spin" />
@@ -1197,7 +1216,7 @@ const downloadLongScreenshot = async () => {
 
                         <div class="flex-1"></div>
 
-                        <Button size="sm" @click="handlePlay">
+                        <Button v-if="hasLocalFile" size="sm" @click="handlePlay">
                             <Play class="mr-2 size-4" fill="currentColor" />
                             播放
                         </Button>
