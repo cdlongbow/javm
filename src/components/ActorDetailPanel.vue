@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Loader2, Download } from 'lucide-vue-next'
 import type { Video } from '@/types'
+import { dmmCoverUrl } from '@/utils/dmm'
 
 interface Props {
     actorId: number | null
@@ -139,7 +140,8 @@ const displayCards = computed<Card[]>(() => {
         else if (activeTab.value === 'missing') ws = ws.filter((w) => w.status !== 'local')
         return ws.map((w) => ({
             key: w.code,
-            coverSrc: w.coverUrl || null,
+            // 无封面 → 用番号直拼 DMM 官方封面兜底（覆盖有码主流）
+            coverSrc: w.coverUrl || dmmCoverUrl(w.code),
             code: w.code,
             title: w.title || '',
             status: w.status === 'local' ? 'local' : 'missing',
@@ -148,7 +150,7 @@ const displayCards = computed<Card[]>(() => {
     }
     return props.localVideos.map((v) => ({
         key: v.id,
-        coverSrc: coverOf(v),
+        coverSrc: coverOf(v) || dmmCoverUrl(v.localId),
         code: v.localId || '',
         title: v.title || '',
         status: 'local' as const,
@@ -214,7 +216,7 @@ const hideBrokenImg = (e: Event) => {
         </div>
 
         <!-- 作品网格 -->
-        <ScrollArea class="flex-1">
+        <ScrollArea class="min-h-0 flex-1">
             <div
                 v-if="loading"
                 class="flex items-center justify-center py-12 text-muted-foreground"

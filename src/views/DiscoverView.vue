@@ -207,6 +207,7 @@ const openVideoById = (videoId: string) => {
             <!-- 演员：档案 + 作品全集（本地有/缺失）；其它分面：本地作品网格 -->
             <ActorDetailPanel
                 v-if="facetType === 'actor'"
+                class="min-h-0 flex-1"
                 :actor-id="selectedActorId"
                 :actor-name="selectedValue!"
                 :local-videos="detailVideos"
