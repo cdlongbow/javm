@@ -31,6 +31,36 @@ pub fn build_star_url(star_code: &str, page: u32) -> String {
     }
 }
 
+/// 按演员名搜索的 URL（`/searchstar/{name}`，路径段百分号编码以支持日文名）。
+pub fn build_search_url(name: &str) -> String {
+    match url::Url::parse(&format!("{HOST}/")) {
+        Ok(mut u) => {
+            u.set_path(&format!("searchstar/{name}"));
+            u.to_string()
+        }
+        Err(_) => format!("{HOST}/searchstar/{name}"),
+    }
+}
+
+/// 从 searchstar 结果页挑出 star（名字优先精确匹配，否则取首个有 star code 的）。
+/// 结果页结构与详情页演员区一致（`.avatar-box`），复用同一解析。
+pub fn pick_star_from_search(html: &str, want_name: &str) -> Option<super::types::ActorAvatar> {
+    let doc = Html::parse_document(html);
+    let mut hits: Vec<super::types::ActorAvatar> =
+        super::sources::javbus::parse_actor_avatars(&doc)
+            .into_iter()
+            .filter(|a| !a.star_code.trim().is_empty())
+            .collect();
+    if hits.is_empty() {
+        return None;
+    }
+    let want = want_name.trim();
+    if let Some(pos) = hits.iter().position(|a| a.name.trim() == want) {
+        return Some(hits.swap_remove(pos));
+    }
+    Some(hits.swap_remove(0))
+}
+
 fn absolutize(u: &str) -> String {
     if u.is_empty() || u.starts_with("http") {
         u.to_string()

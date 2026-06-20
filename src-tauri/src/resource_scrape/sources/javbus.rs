@@ -167,7 +167,7 @@ fn absolutize(u: &str) -> String {
 ///
 /// 结构（站点惯例）：`a.avatar-box[href=/star/{code}]` > `.photo-frame img[src,title]` + `span`。
 /// 名字优先取 `img title`，回退 `span` 文本;占位图（nowprinting）视为无头像。
-fn parse_actor_avatars(doc: &Html) -> Vec<ActorAvatar> {
+pub(crate) fn parse_actor_avatars(doc: &Html) -> Vec<ActorAvatar> {
     let box_sel = match Selector::parse("a.avatar-box") {
         Ok(s) => s,
         Err(_) => return vec![],

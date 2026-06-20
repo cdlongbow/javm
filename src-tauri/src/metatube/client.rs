@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::resource_scrape::types::SearchResult;
 
-use super::types::{MovieInfo, MovieSearchResult};
+use super::types::{ActorInfo, ActorSearchResult, MovieInfo, MovieSearchResult};
 
 /// MetaTube 所有响应统一包一层 `{"data": ...}`（已实测确认）。
 #[derive(Deserialize)]
@@ -78,6 +78,61 @@ impl MetaTubeClient {
             .await
             .map(|env| env.data)
             .map_err(|e| format!("MetaTube 搜索响应解析失败: {}", e))
+    }
+
+    /// 演员聚合搜索（`GET /v1/actors/search`）。`providers` 为空则服务端默认查全部演员源。
+    pub async fn search_actor(
+        &self,
+        name: &str,
+        providers: &[String],
+    ) -> Result<Vec<ActorSearchResult>, String> {
+        let mut url = format!(
+            "{}/v1/actors/search?q={}&fallback=true",
+            self.base_url,
+            urlencoding(name),
+        );
+        if !providers.is_empty() {
+            url.push_str("&provider=");
+            url.push_str(&urlencoding(&providers.join(",")));
+        }
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await
+            .map_err(|e| format!("MetaTube 演员搜索请求失败: {}", e))?;
+        if !resp.status().is_success() {
+            return Err(format!("MetaTube 演员搜索 HTTP {}", resp.status()));
+        }
+        resp.json::<Envelope<Vec<ActorSearchResult>>>()
+            .await
+            .map(|env| env.data)
+            .map_err(|e| format!("MetaTube 演员搜索响应解析失败: {}", e))
+    }
+
+    /// 取演员完整档案（`GET /v1/actors/:provider/:id`）。
+    pub async fn get_actor(&self, provider: &str, id: &str) -> Result<ActorInfo, String> {
+        let url = format!(
+            "{}/v1/actors/{}/{}",
+            self.base_url,
+            urlencoding(provider),
+            urlencoding(id),
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await
+            .map_err(|e| format!("MetaTube 演员详情请求失败: {}", e))?;
+        if !resp.status().is_success() {
+            return Err(format!("MetaTube 演员详情 HTTP {}", resp.status()));
+        }
+        resp.json::<Envelope<ActorInfo>>()
+            .await
+            .map(|env| env.data)
+            .map_err(|e| format!("MetaTube 演员详情响应解析失败: {}", e))
     }
 
     /// 取影片完整详情。

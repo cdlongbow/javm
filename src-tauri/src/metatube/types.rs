@@ -86,6 +86,39 @@ pub struct MovieSearchResult {
     pub score: f64,
 }
 
+/// 演员搜索候选（`GET /v1/actors/search` 返回）
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ActorSearchResult {
+    pub provider: String,
+    /// 该 provider 下的演员 id（JavBus provider 的 id 即 star code）
+    pub id: String,
+    pub name: String,
+    pub images: Vec<String>,
+    pub aliases: Vec<String>,
+}
+
+/// 演员档案（`GET /v1/actors/:provider/:id` 返回的完整 ActorInfo）
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ActorInfo {
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+    pub images: Vec<String>,
+    pub aliases: Vec<String>,
+    pub summary: String,
+    pub nationality: String,
+    pub blood_type: String,
+    pub cup_size: String,
+    /// 三围原文，如 "B88/W58/H85"
+    pub measurements: String,
+    pub height: i64,
+    pub birthday: String,
+    pub debut_date: String,
+    pub homepage: String,
+}
+
 /// 影片详情（`GET /v1/movies/:provider/:id` 返回的完整 MovieInfo）
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]

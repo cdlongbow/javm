@@ -96,6 +96,12 @@ const fetchProfile = async () => {
 const hasWorks = computed(() => works.value.length > 0)
 const localCount = computed(() => works.value.filter((w) => w.status === 'local').length)
 const missingCount = computed(() => works.value.filter((w) => w.status !== 'local').length)
+// 是否已抓取过（已落库）：有作品，或档案已有资料 → 按钮显示「重新抓取」
+const hasFetched = computed(
+    () =>
+        hasWorks.value ||
+        !!(profile.value && (profile.value.birthday || profile.value.height || profile.value.cup)),
+)
 
 const avatarSrc = computed<string | null>(() => {
     const p = profile.value
@@ -188,7 +194,7 @@ const hideBrokenImg = (e: Event) => {
                 <Button size="sm" class="mt-2 gap-1" :disabled="fetching || !actorId" @click="fetchProfile">
                     <Loader2 v-if="fetching" class="size-4 animate-spin" />
                     <Download v-else class="size-4" />
-                    {{ fetching ? '抓取中…' : '抓取档案 / 全集' }}
+                    {{ fetching ? '抓取中…' : hasFetched ? '重新抓取' : '抓取档案 / 全集' }}
                 </Button>
             </div>
         </div>
