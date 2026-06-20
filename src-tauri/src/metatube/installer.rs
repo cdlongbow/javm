@@ -33,7 +33,11 @@ fn download_client() -> Result<wreq::Client, String> {
 
 /// 下载并安装最新 metatube-server 到 `bin_dir`，返回落地的可执行文件路径。
 /// 走全局代理设置，保证仅代理可达 GitHub 的网络下也能下载。
-pub async fn download_latest(bin_dir: &Path) -> Result<PathBuf, String> {
+/// `on_progress(downloaded, total)` 在下载过程中按进度回调（total 可能为 None）。
+pub async fn download_latest(
+    bin_dir: &Path,
+    on_progress: impl Fn(u64, Option<u64>),
+) -> Result<PathBuf, String> {
     let os_arch = current_os_arch().ok_or_else(|| {
         format!(
             "当前系统/架构暂无 MetaTube 预编译版本: {}-{}",
@@ -49,7 +53,7 @@ pub async fn download_latest(bin_dir: &Path) -> Result<PathBuf, String> {
     let url = format!("https://github.com/{RELEASES_REPO}/releases/latest/download/{asset_name}");
     log::info!("[metatube] event=download_start url={url}");
 
-    let resp = client
+    let mut resp = client
         .get(&url)
         .header("User-Agent", "javm")
         .timeout(Duration::from_secs(300))
@@ -63,10 +67,27 @@ pub async fn download_latest(bin_dir: &Path) -> Result<PathBuf, String> {
             asset_name
         ));
     }
-    let zip_bytes = resp
-        .bytes()
+
+    // 流式下载并按进度回调（节流：约百分之一一报，total 未知时每 1MB 一报）
+    let total = resp.content_length();
+    let step = total.map(|t| (t / 100).max(1)).unwrap_or(1_048_576);
+    let mut zip_bytes: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
+    let mut downloaded: u64 = 0;
+    let mut last_emit: u64 = 0;
+    on_progress(0, total);
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| format!("读取 MetaTube 下载内容失败: {e}"))?;
+        .map_err(|e| format!("下载中断: {e}"))?
+    {
+        zip_bytes.extend_from_slice(&chunk);
+        downloaded += chunk.len() as u64;
+        if downloaded - last_emit >= step {
+            last_emit = downloaded;
+            on_progress(downloaded, total);
+        }
+    }
+    on_progress(downloaded, total);
 
     // 3. 解压取出 metatube-server(.exe)：先写临时文件，再**原子重命名**落地，
     //    避免下载/写入中断在目标路径留下半截损坏二进制。
@@ -89,7 +110,10 @@ pub async fn download_latest(bin_dir: &Path) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-/// 从 zip 字节中找出 metatube-server(.exe) 写入 `target`。
+/// 从 zip 字节中找出 metatube-server 可执行文件写入 `target`（即**重命名**为统一名）。
+///
+/// 官方资产内文件名带 os-arch 后缀（如 `metatube-server-windows-amd64.exe`），需按
+/// 「含 metatube + server + 平台扩展名」匹配，不能用固定名（与 CI 的 `*metatube*server*` 一致）。
 fn extract_server_binary(zip_bytes: &[u8], target: &Path) -> Result<(), String> {
     let mut archive =
         zip::ZipArchive::new(Cursor::new(zip_bytes)).map_err(|e| format!("打开压缩包失败: {e}"))?;
@@ -99,7 +123,7 @@ fn extract_server_binary(zip_bytes: &[u8], target: &Path) -> Result<(), String> 
             continue;
         }
         let fname = entry.name().rsplit(['/', '\\']).next().unwrap_or("");
-        if fname == "metatube-server" || fname == "metatube-server.exe" {
+        if is_server_entry(fname) {
             // read_to_end 读满时 zip 会校验 CRC32，传输损坏会在此报错
             let mut buf = Vec::with_capacity(entry.size() as usize);
             entry.read_to_end(&mut buf).map_err(|e| format!("解压/校验失败: {e}"))?;
@@ -111,6 +135,43 @@ fn extract_server_binary(zip_bytes: &[u8], target: &Path) -> Result<(), String> 
         }
     }
     Err("压缩包内未找到 metatube-server 可执行文件".to_string())
+}
+
+/// 是否为 metatube-server 可执行条目：含 metatube + server，且平台扩展名匹配
+/// （Windows 要求 `.exe`，其它平台要求无 `.exe`）。
+fn is_server_entry(fname: &str) -> bool {
+    let lower = fname.to_lowercase();
+    if !(lower.contains("metatube") && lower.contains("server")) {
+        return false;
+    }
+    if cfg!(windows) {
+        lower.ends_with(".exe")
+    } else {
+        !lower.ends_with(".exe")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_server_entry;
+
+    #[test]
+    #[cfg(windows)]
+    fn matches_windows_asset_name() {
+        assert!(is_server_entry("metatube-server-windows-amd64.exe"));
+        assert!(is_server_entry("metatube-server.exe"));
+        assert!(!is_server_entry("metatube-server-linux-amd64")); // 无 .exe
+        assert!(!is_server_entry("readme.txt"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn matches_unix_asset_name() {
+        assert!(is_server_entry("metatube-server-linux-amd64"));
+        assert!(is_server_entry("metatube-server-darwin-arm64"));
+        assert!(!is_server_entry("metatube-server-windows-amd64.exe")); // 有 .exe
+        assert!(!is_server_entry("readme.txt"));
+    }
 }
 
 #[cfg(unix)]

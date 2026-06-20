@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { Plus, GripVertical, Edit, Trash2, ExternalLink, ChevronsUpDown, Copy } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import packageInfo from '../../package.json'
 import appLogo from '../../src-tauri/icons/128x128.png'
 import { useSettingsStore, useUpdaterStore } from '@/stores'
@@ -75,6 +76,14 @@ interface MetaTubeStatusSnapshot {
 const metatubeStatus = ref<MetaTubeStatusSnapshot | null>(null)
 const metatubeRestarting = ref(false)
 const metatubeDownloading = ref(false)
+const metatubeProgress = ref<{ downloaded: number; total: number | null } | null>(null)
+const metatubeProgressText = computed(() => {
+  const p = metatubeProgress.value
+  if (!p) return ''
+  const mb = (b: number) => (b / 1048576).toFixed(1)
+  if (p.total) return `${Math.floor((p.downloaded * 100) / p.total)}% · ${mb(p.downloaded)}/${mb(p.total)}MB`
+  return `${mb(p.downloaded)}MB`
+})
 const metatubeStatusText = computed(() => {
   const map: Record<string, string> = {
     ready: '运行中', starting: '启动中', failed: '启动失败', stopped: '已停止', disabled: '已禁用',
@@ -102,15 +111,26 @@ async function restartMetatube() {
 }
 async function downloadMetatube() {
   metatubeDownloading.value = true
+  metatubeProgress.value = null
   const tid = toast.loading('正在下载最新 MetaTube...')
+  let unlisten: (() => void) | null = null
   try {
+    unlisten = await listen<{ downloaded: number; total: number | null }>(
+      'metatube-download-progress',
+      (e) => {
+        metatubeProgress.value = e.payload
+        toast.loading(`下载中 ${metatubeProgressText.value}`, { id: tid })
+      },
+    )
     metatubeStatus.value = await invoke<MetaTubeStatusSnapshot>('metatube_download_latest')
     toast.success('MetaTube 下载完成', { id: tid })
     setTimeout(loadMetatubeStatus, 2500)
   } catch (e) {
     toast.error(`下载失败: ${(e as Error).message || e}`, { id: tid })
   } finally {
+    if (unlisten) unlisten()
     metatubeDownloading.value = false
+    metatubeProgress.value = null
   }
 }
 function saveMetatube(patch: Partial<import('@/types').MetaTubeSettings>) {
@@ -1227,7 +1247,7 @@ watch(() => settingsStore.settings, async (newSettings) => {
                     <Badge :variant="metatubeStatus?.status === 'ready' ? 'default' : 'secondary'">{{ metatubeStatusText }}</Badge>
                     <Button v-if="metatubeStatus && (!metatubeStatus.binaryPresent || metatubeStatus.status === 'failed')"
                       variant="default" size="sm" :disabled="metatubeDownloading" @click="downloadMetatube">
-                      {{ metatubeDownloading ? '下载中...' : (metatubeStatus.binaryPresent ? '重新下载' : '下载 MetaTube') }}
+                      {{ metatubeDownloading ? (metatubeProgressText ? `下载中 ${metatubeProgressText}` : '下载中...') : (metatubeStatus.binaryPresent ? '重新下载' : '下载 MetaTube') }}
                     </Button>
                     <Button variant="outline" size="sm" :disabled="metatubeRestarting" @click="restartMetatube">
                       {{ metatubeRestarting ? '重启中...' : '重启' }}

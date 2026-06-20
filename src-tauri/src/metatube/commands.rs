@@ -1,6 +1,6 @@
 //! MetaTube sidecar Tauri 命令：状态查询与手动重启。
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use super::types::MetaTubeStatusSnapshot;
 use super::MetaTubeManager;
@@ -34,7 +34,14 @@ pub async fn metatube_download_latest(app: AppHandle) -> Result<MetaTubeStatusSn
         .map_err(|e| format!("无法获取应用数据目录: {e}"))?
         .join("bin");
 
-    super::installer::download_latest(&bin_dir).await?;
+    let emitter = app.clone();
+    super::installer::download_latest(&bin_dir, move |downloaded, total| {
+        let _ = emitter.emit(
+            "metatube-download-progress",
+            serde_json::json!({ "downloaded": downloaded, "total": total }),
+        );
+    })
+    .await?;
 
     let manager = app
         .try_state::<MetaTubeManager>()
