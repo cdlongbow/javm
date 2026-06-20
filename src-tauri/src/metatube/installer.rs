@@ -23,8 +23,10 @@ pub fn current_os_arch() -> Option<&'static str> {
     }
 }
 
-fn http_client() -> Result<wreq::Client, String> {
-    proxy::apply_proxy_auto(wreq::Client::builder())?
+/// 下载客户端：**跟随重定向**（GitHub 资产地址会 302 到 objects.githubusercontent.com，
+/// 项目默认 wreq 客户端不跟随重定向）。复用全局代理。
+fn download_client() -> Result<wreq::Client, String> {
+    proxy::apply_proxy_auto(wreq::Client::builder().redirect(wreq::redirect::Policy::limited(10)))?
         .build()
         .map_err(|e| format!("构建网络客户端失败: {e}"))
 }
@@ -40,47 +42,28 @@ pub async fn download_latest(bin_dir: &Path) -> Result<PathBuf, String> {
         )
     })?;
     let asset_name = format!("metatube-server-{os_arch}.zip");
-    let client = http_client()?;
+    let client = download_client()?;
 
-    // 1. 取最新 release 的资产列表
-    let api = format!("https://api.github.com/repos/{RELEASES_REPO}/releases/latest");
-    let release: serde_json::Value = client
-        .get(&api)
-        .header("User-Agent", "javm")
-        .header("Accept", "application/vnd.github+json")
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| format!("查询 MetaTube 最新版本失败: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("解析 MetaTube 版本信息失败: {e}"))?;
+    // 直接走 GitHub「最新版」资产重定向地址下载，**避开有限流的 REST API**；
+    // 该地址 302 跳到实际下载源，由 download_client 跟随。
+    let url = format!("https://github.com/{RELEASES_REPO}/releases/latest/download/{asset_name}");
+    log::info!("[metatube] event=download_start url={url}");
 
-    let tag = release.get("tag_name").and_then(|v| v.as_str()).unwrap_or("latest");
-    let download_url = release
-        .get("assets")
-        .and_then(|a| a.as_array())
-        .and_then(|assets| {
-            assets.iter().find_map(|asset| {
-                let name = asset.get("name").and_then(|v| v.as_str())?;
-                (name == asset_name)
-                    .then(|| asset.get("browser_download_url").and_then(|v| v.as_str()))
-                    .flatten()
-                    .map(String::from)
-            })
-        })
-        .ok_or_else(|| format!("最新版本 {tag} 未找到匹配资产 {asset_name}"))?;
-
-    log::info!("[metatube] event=download_start tag={tag} asset={asset_name}");
-
-    // 2. 下载 zip 到内存
-    let zip_bytes = client
-        .get(&download_url)
+    let resp = client
+        .get(&url)
         .header("User-Agent", "javm")
         .timeout(Duration::from_secs(300))
         .send()
         .await
-        .map_err(|e| format!("下载 MetaTube 失败: {e}"))?
+        .map_err(|e| format!("下载 MetaTube 失败（网络/代理是否可达 GitHub）: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "下载 MetaTube 失败: HTTP {}（资产 {} 可能不存在，或网络/代理不可达 GitHub）",
+            resp.status().as_u16(),
+            asset_name
+        ));
+    }
+    let zip_bytes = resp
         .bytes()
         .await
         .map_err(|e| format!("读取 MetaTube 下载内容失败: {e}"))?;
