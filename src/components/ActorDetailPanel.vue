@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -50,13 +51,14 @@ const loading = ref(false)
 const fetching = ref(false)
 const activeTab = ref<'all' | 'local' | 'missing'>('all')
 
-const loadDetail = async () => {
+// silent=true：增量刷新时不切 loading（避免抓取过程中网格闪烁）
+const loadDetail = async (silent = false) => {
     if (!props.actorId) {
         profile.value = null
         works.value = []
         return
     }
-    loading.value = true
+    if (!silent) loading.value = true
     try {
         const res = await invoke<{ profile: ActorProfile; works: ActorWork[] }>('get_actor_detail', {
             actorId: props.actorId,
@@ -66,7 +68,7 @@ const loadDetail = async () => {
     } catch (e) {
         console.error('获取演员详情失败:', e)
     } finally {
-        loading.value = false
+        if (!silent) loading.value = false
     }
 }
 
@@ -82,7 +84,15 @@ watch(
 const fetchProfile = async () => {
     if (!props.actorId || fetching.value) return
     fetching.value = true
+    let unlisten: (() => void) | null = null
     try {
+        // 边抓边显示：后端每页发进度，这里增量刷新
+        unlisten = await listen<{ actorId: number; worksTotal: number }>(
+            'actor-fetch-progress',
+            (e) => {
+                if (e.payload?.actorId === props.actorId) loadDetail(true)
+            },
+        )
         const r = await invoke<{ profileUpdated: boolean; worksTotal: number; worksLocal: number }>(
             'fetch_actor_profile',
             { actorId: props.actorId },
@@ -94,6 +104,7 @@ const fetchProfile = async () => {
         console.error('抓取演员档案失败:', e)
         toast.error('抓取失败: ' + String(e))
     } finally {
+        if (unlisten) unlisten()
         fetching.value = false
     }
 }

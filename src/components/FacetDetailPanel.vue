@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -37,8 +38,9 @@ const loading = ref(false)
 const fetching = ref(false)
 const activeTab = ref<'all' | 'local' | 'missing'>('all')
 
-const loadDetail = async () => {
-    loading.value = true
+// silent=true：增量刷新时不切 loading（避免抓取过程中网格闪烁）
+const loadDetail = async (silent = false) => {
+    if (!silent) loading.value = true
     try {
         const res = await invoke<{ works: FacetWork[] }>('get_facet_detail', {
             facetType: props.facetType,
@@ -48,7 +50,7 @@ const loadDetail = async () => {
     } catch (e) {
         console.error('获取维度详情失败:', e)
     } finally {
-        loading.value = false
+        if (!silent) loading.value = false
     }
 }
 
@@ -64,7 +66,15 @@ watch(
 const fetchWorks = async () => {
     if (fetching.value) return
     fetching.value = true
+    let unlisten: (() => void) | null = null
     try {
+        // 边抓边显示：后端每页发进度，这里增量刷新
+        unlisten = await listen<{ facetName: string; worksTotal: number }>(
+            'facet-fetch-progress',
+            (e) => {
+                if (e.payload?.facetName === props.facetName) loadDetail(true)
+            },
+        )
         const r = await invoke<{ worksTotal: number; worksLocal: number }>('fetch_facet_works', {
             facetType: props.facetType,
             facetName: props.facetName,
@@ -75,6 +85,7 @@ const fetchWorks = async () => {
         console.error('抓取全集失败:', e)
         toast.error('抓取失败: ' + String(e))
     } finally {
+        if (unlisten) unlisten()
         fetching.value = false
     }
 }

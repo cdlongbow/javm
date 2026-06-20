@@ -187,7 +187,7 @@ const openVideoById = (videoId: string) => {
             >
                 <p>暂无{{ currentFacetLabel }}数据</p>
             </div>
-            <ScrollArea v-else class="flex-1">
+            <ScrollArea v-else class="min-h-0 flex-1">
                 <div class="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3 p-4">
                     <button
                         v-for="fv in facetValues"

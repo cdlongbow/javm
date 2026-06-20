@@ -1,6 +1,6 @@
 //! 演员中心命令：抓取档案 + 作品全集（star 页），演员详情查询。
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::db::{ActorWorkInput, Database, FacetWorkInput, MetadataTable};
@@ -161,9 +161,25 @@ pub async fn fetch_actor_profile(
         )));
     }
 
-    // 2. 全集：有 star code 才分页抓 star 页（MetaTube 不提供作品全集）。经 fetcher 过年龄门。
-    let mut profile: Option<crate::db::ActorProfileInput> = None;
-    let mut works: Vec<actor_provider::StarWork> = Vec::new();
+    // 2. 先落 MetaTube 档案并发进度，让前端立即显示档案（即使没全集也有档案）
+    let mut profile_updated = mt_profile.is_some();
+    if let Some(p) = mt_profile.clone() {
+        let db_inner = db.inner().clone();
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let conn = db_inner.get_connection()?;
+            Database::update_actor_profile(&conn, actor_id, &p)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::TaskJoin(e.to_string()))??;
+    }
+    let _ = app.emit(
+        "actor-fetch-progress",
+        serde_json::json!({ "actorId": actor_id, "worksTotal": 0 }),
+    );
+
+    // 3. 全集：有 star code 才分页抓 star 页，**边抓边存边发进度**，前端每页即增量显示
+    let mut works_total = 0usize;
     if let Some(code) = &star_code {
         let mut page = 1u32;
         loop {
@@ -172,67 +188,79 @@ pub async fn fetch_actor_profile(
                 .fetch(&app, &url, &site, options, &token)
                 .await
                 .map_err(AppError::Business)?;
-
-            if page == 1 {
-                profile = Some(actor_provider::parse_profile(&html));
-            }
+            let page_profile = if page == 1 {
+                Some(actor_provider::parse_profile(&html))
+            } else {
+                None
+            };
             let page_works = actor_provider::parse_works(&html);
             let has_next = actor_provider::parse_has_next_page(&html);
-            if page_works.is_empty() {
+            if page_profile.is_some() {
+                profile_updated = true;
+            }
+            let n = page_works.len();
+            if n == 0 && page_profile.is_none() {
                 break;
             }
-            works.extend(page_works);
-            if !has_next || page >= MAX_STAR_PAGES {
+
+            // 持久化本页（page1 档案 + 作品 + 本地匹配）。page1 在 star 档案后重写 MetaTube，保 MetaTube 优先
+            let db_inner = db.inner().clone();
+            let batch = page_works;
+            let pp = page_profile;
+            let mt = if page == 1 { mt_profile.clone() } else { None };
+            tokio::task::spawn_blocking(move || -> AppResult<()> {
+                let mut conn = db_inner.get_connection()?;
+                let tx = conn.transaction()?;
+                if let Some(p) = &pp {
+                    Database::update_actor_profile(&tx, actor_id, p)?;
+                }
+                if let Some(p) = &mt {
+                    Database::update_actor_profile(&tx, actor_id, p)?;
+                }
+                for w in &batch {
+                    let is_unc = designation_recognizer::is_uncensored_designation(&w.code);
+                    Database::upsert_actor_work(
+                        &tx,
+                        &ActorWorkInput {
+                            actor_id,
+                            code: &w.code,
+                            title: opt(&w.title),
+                            cover_url: opt(&w.cover_url),
+                            release_date: opt(&w.release_date),
+                            source: Some("javbus"),
+                            is_uncensored: is_unc,
+                        },
+                    )?;
+                }
+                Database::relink_actor_works_local(&tx, actor_id)?;
+                tx.commit()?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| AppError::TaskJoin(e.to_string()))??;
+            works_total += n;
+
+            let _ = app.emit(
+                "actor-fetch-progress",
+                serde_json::json!({ "actorId": actor_id, "worksTotal": works_total }),
+            );
+
+            if n == 0 || !has_next || page >= MAX_STAR_PAGES {
                 break;
             }
             page += 1;
         }
     }
 
-    // 3. 落库（单事务：档案 + 作品 upsert + 本地匹配 + 作品数）
-    let profile_updated = profile.is_some() || mt_profile.is_some();
-    let works_total = works.len();
-    let db_inner = db.inner().clone();
-    let works_local = tokio::task::spawn_blocking(move || -> AppResult<i64> {
-        let mut conn = db_inner.get_connection()?;
-        let tx = conn.transaction()?;
-
-        // 先写 star 页解析档案，再写 MetaTube 档案（COALESCE：MetaTube 覆盖冲突项、补空缺）
-        if let Some(p) = &profile {
-            Database::update_actor_profile(&tx, actor_id, p)?;
-        }
-        if let Some(p) = &mt_profile {
-            Database::update_actor_profile(&tx, actor_id, p)?;
-        }
-        for w in &works {
-            let is_unc = designation_recognizer::is_uncensored_designation(&w.code);
-            Database::upsert_actor_work(
-                &tx,
-                &ActorWorkInput {
-                    actor_id,
-                    code: &w.code,
-                    title: opt(&w.title),
-                    cover_url: opt(&w.cover_url),
-                    release_date: opt(&w.release_date),
-                    source: Some("javbus"),
-                    is_uncensored: is_unc,
-                },
-            )?;
-        }
-        Database::relink_actor_works_local(&tx, actor_id)?;
-        Database::set_actor_work_count(&tx, actor_id, works_total as i64)?;
-
-        let local: i64 = tx.query_row(
+    let works_local: i64 = {
+        let conn = db.get_connection()?;
+        Database::set_actor_work_count(&conn, actor_id, works_total as i64)?;
+        conn.query_row(
             "SELECT COUNT(*) FROM actor_works WHERE actor_id = ?1 AND status = 'local'",
             rusqlite::params![actor_id],
             |r| r.get(0),
-        )?;
-        tx.commit()?;
-        Ok(local)
-    })
-    .await
-    .map_err(|e| AppError::TaskJoin(e.to_string()))??;
-
+        )?
+    };
     Ok(ActorFetchResult {
         profile_updated,
         works_total,
@@ -372,8 +400,8 @@ pub async fn fetch_facet_works(
         AppError::Business(format!("无法定位「{facet_name}」的数据源链接（需先刮削其下任一作品）"))
     })?;
 
-    // 3. 分页抓全集
-    let mut works: Vec<actor_provider::StarWork> = Vec::new();
+    // 3. 分页抓全集：**边抓边存边发进度**，前端每页即增量显示，不等全部结束
+    let mut works_total = 0usize;
     let mut page = 1u32;
     loop {
         let url = actor_provider::build_facet_url(&facet_type, &source_id, page);
@@ -386,48 +414,59 @@ pub async fn fetch_facet_works(
         if page_works.is_empty() {
             break;
         }
-        works.extend(page_works);
+
+        // 持久化本页 + 本地匹配
+        let db_inner = db.inner().clone();
+        let ft = facet_type.clone();
+        let batch = page_works;
+        let n = batch.len();
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let mut conn = db_inner.get_connection()?;
+            let tx = conn.transaction()?;
+            for w in &batch {
+                let is_unc = designation_recognizer::is_uncensored_designation(&w.code);
+                Database::upsert_facet_work(
+                    &tx,
+                    &FacetWorkInput {
+                        facet_type: &ft,
+                        facet_id,
+                        code: &w.code,
+                        title: opt(&w.title),
+                        cover_url: opt(&w.cover_url),
+                        release_date: opt(&w.release_date),
+                        source: Some("javbus"),
+                        is_uncensored: is_unc,
+                    },
+                )?;
+            }
+            Database::relink_facet_works_local(&tx, &ft, facet_id)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::TaskJoin(e.to_string()))??;
+        works_total += n;
+
+        // 进度事件 → 前端增量刷新
+        let _ = app.emit(
+            "facet-fetch-progress",
+            serde_json::json!({ "facetName": facet_name, "worksTotal": works_total }),
+        );
+
         if !has_next || page >= MAX_STAR_PAGES {
             break;
         }
         page += 1;
     }
 
-    // 4. 落库
-    let works_total = works.len();
-    let db_inner = db.inner().clone();
-    let ft = facet_type.clone();
-    let works_local = tokio::task::spawn_blocking(move || -> AppResult<i64> {
-        let mut conn = db_inner.get_connection()?;
-        let tx = conn.transaction()?;
-        for w in &works {
-            let is_unc = designation_recognizer::is_uncensored_designation(&w.code);
-            Database::upsert_facet_work(
-                &tx,
-                &FacetWorkInput {
-                    facet_type: &ft,
-                    facet_id,
-                    code: &w.code,
-                    title: opt(&w.title),
-                    cover_url: opt(&w.cover_url),
-                    release_date: opt(&w.release_date),
-                    source: Some("javbus"),
-                    is_uncensored: is_unc,
-                },
-            )?;
-        }
-        Database::relink_facet_works_local(&tx, &ft, facet_id)?;
-        let local: i64 = tx.query_row(
+    let works_local: i64 = {
+        let conn = db.get_connection()?;
+        conn.query_row(
             "SELECT COUNT(*) FROM facet_works WHERE facet_type = ?1 AND facet_id = ?2 AND status = 'local'",
-            rusqlite::params![&ft, facet_id],
+            rusqlite::params![&facet_type, facet_id],
             |r| r.get(0),
-        )?;
-        tx.commit()?;
-        Ok(local)
-    })
-    .await
-    .map_err(|e| AppError::TaskJoin(e.to_string()))??;
-
+        )?
+    };
     Ok(FacetFetchResult { works_total, works_local })
 }
 
