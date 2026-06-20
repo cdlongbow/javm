@@ -282,13 +282,33 @@ async fn proxy_preview_images_to_files(
         }));
     }
 
+    let mut drop_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for handle in handles {
         if let Ok(Some((idx, local_path))) = handle.await {
-            display_urls[idx] = local_path;
+            // 过滤太小的预览图（如 125x100 网格缩略图），不作为有效预览
+            if crate::media::artwork::is_undersized_preview(&local_path) {
+                let _ = std::fs::remove_file(&local_path);
+                drop_indices.insert(idx);
+            } else {
+                display_urls[idx] = local_path;
+            }
         }
     }
 
-    let remote_urls = if has_remote_urls { Some(remote_urls) } else { None };
+    // 太小的预览图从 display 与 remote 同步移除，保持两向量对齐
+    let (display_urls, remote_urls): (Vec<String>, Vec<String>) = display_urls
+        .into_iter()
+        .zip(remote_urls)
+        .enumerate()
+        .filter(|(i, _)| !drop_indices.contains(i))
+        .map(|(_, pair)| pair)
+        .unzip();
+
+    let remote_urls = if has_remote_urls && !remote_urls.is_empty() {
+        Some(remote_urls)
+    } else {
+        None
+    };
     (display_urls, remote_urls)
 }
 

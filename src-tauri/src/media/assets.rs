@@ -822,7 +822,19 @@ pub async fn sync_extrafanart_to_dir(
             }
             let _permit = sem.acquire_owned().await.ok()?;
             match crate::download::image::download_image(&client, &trimmed, &save_path).await {
-                Ok(path) => Some((index, path)),
+                Ok(path) => {
+                    // 过滤太小的预览图（如 125x100 网格缩略图），不算有效图片
+                    if crate::media::artwork::is_undersized_preview(&path) {
+                        log::info!(
+                            "[media_assets] event=extrafanart_too_small index={} url={}",
+                            index, trimmed
+                        );
+                        let _ = fs::remove_file(&save_path);
+                        None
+                    } else {
+                        Some((index, path))
+                    }
+                }
                 Err(e) => {
                     log::error!(
                         "[media_assets] event=download_extrafanart_failed index={} url={} error={}",

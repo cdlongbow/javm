@@ -51,6 +51,14 @@ pub fn read_image_dimensions(path: Option<&str>) -> (Option<i32>, Option<i32>) {
     }
 }
 
+/// 预览图最小有效短边（像素）。短边小于此视为无效缩略图（如 125x100 网格图），刮削时过滤掉。
+pub const MIN_PREVIEW_EDGE: u32 = 250;
+
+/// 是否为「太小的预览图」（短边 < [`MIN_PREVIEW_EDGE`]）。读不出尺寸时保守视为有效（返回 false）。
+pub fn is_undersized_preview(path: &str) -> bool {
+    matches!(image::image_dimensions(path), Ok((w, h)) if w.min(h) < MIN_PREVIEW_EDGE)
+}
+
 /// 图集文件路径：`<dir>/<stem>-<suffix>.jpg`
 pub fn artwork_path(dir: &Path, stem: &str, suffix: &str) -> PathBuf {
     dir.join(format!("{}-{}.jpg", stem, suffix))
