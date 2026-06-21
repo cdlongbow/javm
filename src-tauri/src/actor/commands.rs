@@ -690,6 +690,32 @@ fn facet_metadata_table(facet_type: &str) -> Option<MetadataTable> {
     }
 }
 
+/// 分类数据源 id 的「排除法对应」：库内作品分类与页面分类逐一对消。
+/// 若目标分类是库内**唯一**对不上页面的、且页面也恰好剩**唯一**对不上库内的，则二者唯一对应
+/// （解决简繁/跨源同义但写法不同，如「丝袜」↔「絲襪」）；存在多个歧义则放弃（返回 None）。
+fn resolve_genre_by_elimination(
+    want: &str,
+    app_genres: &[String],
+    page: &[(String, String)],
+) -> Option<String> {
+    use std::collections::HashSet;
+    let page_names: HashSet<&str> = page.iter().map(|(n, _)| n.as_str()).collect();
+    let app_names: HashSet<&str> = app_genres.iter().map(|s| s.as_str()).collect();
+    let unmatched_app: Vec<&str> = app_genres
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|n| !page_names.contains(n))
+        .collect();
+    let unmatched_page: Vec<&(String, String)> = page
+        .iter()
+        .filter(|(n, _)| !app_names.contains(n.as_str()))
+        .collect();
+    if unmatched_app.len() == 1 && unmatched_app[0] == want && unmatched_page.len() == 1 {
+        return Some(unmatched_page[0].1.clone());
+    }
+    None
+}
+
 /// 抓取某维度（片商/系列/导演）的作品全集：定位其数据源 id（缓存优先，否则刮该维度下任一本地番号的
 /// 详情页解析），分页爬全集 → 落库 + 本地匹配。经 Fetcher 过年龄门。
 #[tauri::command]
@@ -749,9 +775,18 @@ pub async fn fetch_facet_works(
                 } else {
                     None
                 };
-                if let Some(sid) =
-                    actor_provider::parse_facet_source_id(&html, &facet_type, want_name)
-                {
+                let mut sid =
+                    actor_provider::parse_facet_source_id(&html, &facet_type, want_name);
+                // 分类精确名对不上（如库内简体「丝袜」vs javbus 繁体「絲襪」）：用排除法对应
+                if sid.is_none() && facet_type == "genre" {
+                    let app_genres = {
+                        let conn = db.get_connection()?;
+                        Database::get_local_video_genres(&conn, &code).unwrap_or_default()
+                    };
+                    let page_links = actor_provider::parse_facet_links(&html, "genre");
+                    sid = resolve_genre_by_elimination(facet_name.trim(), &app_genres, &page_links);
+                }
+                if let Some(sid) = sid {
                     let conn = db.get_connection()?;
                     let _ = Database::set_facet_source_id(&conn, &facet_type, facet_id, &sid);
                     source_id = Some(sid);
@@ -936,4 +971,40 @@ pub async fn list_favorites(
 ) -> AppResult<Vec<String>> {
     let conn = db.get_connection()?;
     Ok(Database::list_favorites(&conn, &entity_type)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_genre_by_elimination;
+
+    fn page(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items.iter().map(|(n, i)| (n.to_string(), i.to_string())).collect()
+    }
+
+    #[test]
+    fn elimination_maps_single_unmatched_pair() {
+        // 库内简体「丝袜」，页面繁体「絲襪」，其余（巨乳/OL）两侧一致 → 唯一对应
+        let app = vec!["丝袜".into(), "巨乳".into(), "OL".into()];
+        let pg = page(&[("絲襪", "g_si"), ("巨乳", "g_ju"), ("OL", "g_ol")]);
+        assert_eq!(
+            resolve_genre_by_elimination("丝袜", &app, &pg).as_deref(),
+            Some("g_si")
+        );
+    }
+
+    #[test]
+    fn elimination_gives_up_on_ambiguity() {
+        // 两个分类都对不上 → 无法唯一确定 → None
+        let app = vec!["丝袜".into(), "黑丝".into(), "OL".into()];
+        let pg = page(&[("絲襪", "g_si"), ("黑絲", "g_hei"), ("OL", "g_ol")]);
+        assert_eq!(resolve_genre_by_elimination("丝袜", &app, &pg), None);
+    }
+
+    #[test]
+    fn elimination_none_when_target_matches_directly() {
+        // 目标其实页面上有同名（不该走排除法）→ 不是唯一对不上的，返回 None
+        let app = vec!["巨乳".into(), "OL".into()];
+        let pg = page(&[("巨乳", "g_ju"), ("OL", "g_ol")]);
+        assert_eq!(resolve_genre_by_elimination("巨乳", &app, &pg), None);
+    }
 }

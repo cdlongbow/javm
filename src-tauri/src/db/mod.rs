@@ -920,6 +920,18 @@ impl Database {
         .map(|opt| opt.flatten())
     }
 
+    /// 某番号对应本地视频的全部分类名（分类数据源 id「排除法对应」用）。
+    pub fn get_local_video_genres(conn: &Connection, code: &str) -> Result<Vec<String>> {
+        let mut stmt = conn.prepare(
+            "SELECT g.name FROM video_genres vg
+             JOIN genres g ON g.id = vg.genre_id
+             JOIN videos v ON v.id = vg.video_id
+             WHERE UPPER(TRIM(v.local_id)) = UPPER(TRIM(?1))",
+        )?;
+        let rows = stmt.query_map(params![code], |r| r.get::<_, String>(0))?;
+        rows.collect()
+    }
+
     /// 找该维度下任一本地视频的番号（用于刮其详情页解析维度的数据源 id）。
     pub fn find_local_code_for_facet(
         conn: &Connection,

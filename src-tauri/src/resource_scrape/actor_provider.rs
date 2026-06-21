@@ -81,6 +81,36 @@ pub fn parse_facet_source_id(
     None
 }
 
+/// 解析详情页 `.info` 内某维度的**全部** (名字, 数据源id) 链接。
+/// 分类一片多值，精确名对不上时供「排除法对应」用。
+pub fn parse_facet_links(detail_html: &str, facet_type: &str) -> Vec<(String, String)> {
+    let doc = Html::parse_document(detail_html);
+    let needle = format!("/{}/", facet_type);
+    let Ok(sel) = Selector::parse(".info a[href]") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for a in doc.select(&sel) {
+        let Some(href) = a.value().attr("href") else {
+            continue;
+        };
+        let Some(pos) = href.find(&needle) else {
+            continue;
+        };
+        let id = href[pos + needle.len()..]
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let name = a.text().collect::<String>().trim().to_string();
+        if !id.is_empty() && !name.is_empty() {
+            out.push((name, id));
+        }
+    }
+    out
+}
+
 /// 按演员名搜索的 URL（`/searchstar/{name}`，路径段百分号编码以支持日文名）。
 pub fn build_search_url(name: &str) -> String {
     match url::Url::parse(&format!("{HOST}/")) {
