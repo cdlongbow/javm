@@ -9,10 +9,17 @@ import { Loader2, Download, Star, Pencil, Check, X } from 'lucide-vue-next'
 import { Input } from '@/components/ui/input'
 import type { Video } from '@/types'
 import { dmmCoverUrl, dmmMonoCoverUrl, isDmmPlaceholderSize, isDmmImageUrl } from '@/utils/dmm'
+import { useScrollMemory } from '@/composables/useScrollMemory'
 import { useSettingsStore, useFavoritesStore } from '@/stores'
 
 const settingsStore = useSettingsStore()
 const favoritesStore = useFavoritesStore()
+
+// 记忆作品网格滚动位置（按演员区分）：跨路由返回、切回同一演员都恢复
+const scrollAreaRef = ref<any>(null)
+const getViewport = (): HTMLElement | null =>
+    (scrollAreaRef.value?.$el?.querySelector('[data-slot="scroll-area-viewport"]') as HTMLElement) ?? null
+const { restore: restoreScroll } = useScrollMemory(getViewport, () => `actor:${props.actorId}`)
 
 // 收藏（按演员名）
 const isFav = computed(() => favoritesStore.isFavorite('actor', props.actorName))
@@ -211,7 +218,8 @@ watch(
         activeTab.value = 'all'
         filterText.value = ''
         aliasEditing.value = false
-        loadDetail()
+        // 切换演员后内容重载完再恢复该演员上次的滚动位置
+        void loadDetail().then(() => restoreScroll())
         favoritesStore.load('actor')
     },
     { immediate: true },
@@ -531,7 +539,7 @@ const onCoverError = (e: Event, code: string) => {
         </div>
 
         <!-- 作品网格 -->
-        <ScrollArea class="min-h-0 flex-1">
+        <ScrollArea ref="scrollAreaRef" class="min-h-0 flex-1">
             <div
                 v-if="loading"
                 class="flex items-center justify-center py-12 text-muted-foreground"

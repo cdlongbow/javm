@@ -9,10 +9,20 @@ import { Input } from '@/components/ui/input'
 import { Loader2, Download, Star, X } from 'lucide-vue-next'
 import type { Video } from '@/types'
 import { dmmCoverUrl, dmmMonoCoverUrl, isDmmPlaceholderSize, isDmmImageUrl } from '@/utils/dmm'
+import { useScrollMemory } from '@/composables/useScrollMemory'
 import { useSettingsStore, useFavoritesStore } from '@/stores'
 
 const settingsStore = useSettingsStore()
 const favoritesStore = useFavoritesStore()
+
+// 记忆作品网格滚动位置（按维度+取值区分）：跨路由返回、切回同一取值都恢复
+const scrollAreaRef = ref<any>(null)
+const getViewport = (): HTMLElement | null =>
+    (scrollAreaRef.value?.$el?.querySelector('[data-slot="scroll-area-viewport"]') as HTMLElement) ?? null
+const { restore: restoreScroll } = useScrollMemory(
+    getViewport,
+    () => `facet:${props.facetType}:${props.facetName}`,
+)
 
 // 收藏（按维度类型 + 取值名）
 const isFav = computed(() => favoritesStore.isFavorite(props.facetType, props.facetName))
@@ -70,7 +80,8 @@ watch(
     () => {
         activeTab.value = 'all'
         filterText.value = ''
-        loadDetail()
+        // 取值切换后内容重载完再恢复该取值上次的滚动位置
+        void loadDetail().then(() => restoreScroll())
         favoritesStore.load(props.facetType)
     },
     { immediate: true },
@@ -304,7 +315,7 @@ const onCoverError = (e: Event, code: string) => {
         </div>
 
         <!-- 作品网格 -->
-        <ScrollArea class="min-h-0 flex-1">
+        <ScrollArea ref="scrollAreaRef" class="min-h-0 flex-1">
             <div v-if="loading" class="flex items-center justify-center py-12 text-muted-foreground">
                 <Loader2 class="size-6 animate-spin" />
             </div>
