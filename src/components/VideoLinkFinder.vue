@@ -63,9 +63,12 @@ const adding = ref(false)
 const sites = ref<VideoSite[]>([])
 const selectedSiteId = ref('missav')
 const cfChallengeActive = ref(false)
+const notFound = ref(false) // 页面 404 / 找不到：直接结束并提示，不再转圈
+const showAll = ref(false) // 显示全部（含被屏蔽的广告/片段链接）
 const seenUrls = new Set<string>()
 let unlisten: UnlistenFn | null = null
 let unlistenCf: UnlistenFn | null = null
+let unlistenPageState: UnlistenFn | null = null
 
 // 下载查重状态
 const duplicateCheckOpen = ref(false)
@@ -170,6 +173,17 @@ const realLink = computed(() => {
   return candidates[0] ?? null
 })
 
+// 广告/片段识别：已分析且时长 0~120 秒（正片需 ≥300 秒，不会落入此区间）
+function isAdOrClip(link: VideoLink): boolean {
+  return !!(link.analyzed && link.durationSecs && link.durationSecs > 0 && link.durationSecs < 120)
+}
+// 被屏蔽（广告/片段）的链接数量
+const blockedCount = computed(() => links.value.filter(isAdOrClip).length)
+// 实际展示的链接：默认屏蔽广告/片段，勾选"显示全部"后才展示
+const visibleLinks = computed(() =>
+  showAll.value ? sortedLinks.value : sortedLinks.value.filter(l => !isAdOrClip(l))
+)
+
 function formatDuration(secs?: number): string {
   if (!secs || secs <= 0) return ''
   const s = Math.round(secs)
@@ -192,6 +206,7 @@ async function startFinding() {
   if (!trimmed) return
 
   scanning.value = true
+  notFound.value = false
   links.value = []
   selectedUrls.value = new Set()
   seenUrls.clear()
@@ -206,6 +221,15 @@ async function startFinding() {
   try {
     unlisten = await listen<string>('video-finder-link', (event) => {
       handleCapturedUrl(event.payload)
+    })
+
+    // 页面 404 / 找不到：尚无任何链接时直接结束并提示，不再空转
+    unlistenPageState = await listen<string>('video-finder-page-state', (event) => {
+      if (event.payload === 'not-found' && scanning.value && links.value.length === 0) {
+        notFound.value = true
+        toast.info('未找到该番号的视频链接')
+        void stopFinding()
+      }
     })
 
     unlistenCf = await listen<{ status: 'idle' | 'active' | 'passed' | 'timeout' | 'failed'; active: boolean }>('video-finder-cf-state', (event) => {
@@ -271,6 +295,7 @@ async function switchSite(siteId: string) {
   selectedUrls.value = new Set()
   seenUrls.clear()
   cfChallengeActive.value = false
+  notFound.value = false
   scanning.value = true
   try {
     await findVideoLinks(code.value.trim().toUpperCase(), siteId)
@@ -286,6 +311,7 @@ async function stopFinding() {
   scanning.value = false
   if (unlisten) { unlisten(); unlisten = null }
   if (unlistenCf) { unlistenCf(); unlistenCf = null }
+  if (unlistenPageState) { unlistenPageState(); unlistenPageState = null }
   cfChallengeActive.value = false
   try { await closeVideoFinder() } catch { /* 忽略 */ }
 }
@@ -298,7 +324,8 @@ function toggleSelect(url: string) {
 }
 
 function selectAll() {
-  selectedUrls.value = new Set(links.value.map(l => l.url))
+  // 仅全选当前可见链接，避免把被屏蔽的广告/片段也选中
+  selectedUrls.value = new Set(visibleLinks.value.map(l => l.url))
 }
 
 function selectNone() {
@@ -453,6 +480,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (unlisten) { unlisten(); unlisten = null }
   if (unlistenCf) { unlistenCf(); unlistenCf = null }
+  if (unlistenPageState) { unlistenPageState(); unlistenPageState = null }
   cfChallengeActive.value = false
   closeVideoFinder().catch(() => { /* 忽略 */ })
 })
@@ -514,6 +542,13 @@ onUnmounted(() => {
         <span class="text-xs text-muted-foreground">{{ cfChallengeActive ? (settingsStore.settings.scrape.webviewFallbackEnabled ? '请在弹出的窗口中完成验证后返回' : '验证弹窗已关闭，可能无法获取该站点链接') : `正在访问 ${selectedSiteName}，请等待页面加载` }}</span>
       </div>
 
+      <!-- 未找到：页面 404 / 找不到，已直接结束 -->
+      <div v-else-if="notFound && links.length === 0"
+        class="flex flex-col items-center justify-center py-16 gap-3 text-muted-foreground">
+        <X class="size-8 opacity-30" />
+        <span class="text-sm">未找到该番号的视频链接，可换个资源站再试</span>
+      </div>
+
       <!-- 未开始 -->
       <div v-else-if="!scanning && links.length === 0"
         class="flex flex-col items-center justify-center py-16 gap-3 text-muted-foreground">
@@ -535,6 +570,10 @@ onUnmounted(() => {
             </Badge>
           </div>
           <div class="flex items-center gap-2">
+            <label class="mr-1 flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted-foreground">
+              <Checkbox :model-value="showAll" @update:model-value="(v) => (showAll = !!v)" />
+              显示全部<span v-if="blockedCount > 0" class="tabular-nums">（已屏蔽 {{ blockedCount }}）</span>
+            </label>
             <Button variant="ghost" size="sm" @click="selectAll">全选</Button>
             <Button variant="ghost" size="sm" @click="selectNone">取消</Button>
           </div>
@@ -542,7 +581,10 @@ onUnmounted(() => {
 
         <ScrollArea class="flex-1 min-h-0 rounded-md border">
           <div class="p-2 space-y-1">
-            <ContextMenu v-for="link in sortedLinks" :key="link.url">
+            <div v-if="visibleLinks.length === 0" class="py-8 text-center text-xs text-muted-foreground">
+              已屏蔽 {{ blockedCount }} 个广告/片段链接，勾选"显示全部"查看
+            </div>
+            <ContextMenu v-for="link in visibleLinks" :key="link.url">
               <ContextMenuTrigger as-child>
                 <div class="flex items-start gap-3 rounded-md p-2.5 hover:bg-muted/50 transition-colors cursor-pointer"
                   :class="[
@@ -564,7 +606,7 @@ onUnmounted(() => {
                         {{ formatDuration(link.durationSecs) }}
                       </Badge>
                       <Badge v-if="link.url === realLink?.url" class="text-[10px] bg-green-600">正片</Badge>
-                      <Badge v-else-if="link.analyzed && link.durationSecs && link.durationSecs < 120"
+                      <Badge v-else-if="isAdOrClip(link)"
                         variant="secondary" class="text-[10px]">广告/片段</Badge>
                       <Badge v-if="link.isHls && link.url !== realLink?.url" variant="default" class="text-[10px] bg-green-600">
                         HLS ✓

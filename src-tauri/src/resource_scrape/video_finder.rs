@@ -260,8 +260,31 @@ pub(crate) const INTERCEPT_JS: &str = r#"
     });
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
+    // ========== 404 / 未找到检测 ==========
+    // 页面明确是"找不到/404"时通知前端尽早结束，避免一直转圈等待。
+    // 只看标题与 h1，避免误杀正常视频页（正片页标题为番号/片名，不含这些词）。
+    var __notFoundReported = false;
+    var NOT_FOUND_RE = /(^|[\s\-|·])(404|not\s*found|page\s*not\s*found|页面不存在|页面未找到|找不到页面|内容不存在|內容不存在|视频不存在|影片不存在|ページが見つかりません|お探しのページ)/i;
+    function reportNotFound() {
+        if (__notFoundReported) return;
+        if (document.readyState !== 'complete') return;
+        var title = document.title || '';
+        var h1 = document.querySelector('h1');
+        var h1text = h1 ? (h1.textContent || '') : '';
+        if (NOT_FOUND_RE.test(title) || NOT_FOUND_RE.test(h1text)) {
+            __notFoundReported = true;
+            try {
+                if (window.__TAURI__ && window.__TAURI__.event) {
+                    window.__TAURI__.event.emit('video-finder-page-state', 'not-found');
+                }
+            } catch(e) {}
+        }
+    }
+
     // ========== 定期扫描 ==========
     function fullScan() {
+        // 顺带检测当前页面是否为 404 / 找不到
+        reportNotFound();
         // 扫描所有 script 标签
         document.querySelectorAll('script').forEach(function(s) {
             scanText(s.textContent || '');
