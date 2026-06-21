@@ -61,13 +61,31 @@ export interface FacetValue {
     count: number
 }
 
-/** 聚合某分面下的所有取值与作品数（本地库派生）。 */
-export function aggregateFacet(videos: Video[], type: FacetType): FacetValue[] {
-    const map = new Map<string, number>()
+/**
+ * 聚合某分面下的所有取值与作品数（本地库派生）。
+ *
+ * `resolve` 可把原始取值映射到合并键 + 展示名（演员按别名簇合并：同一人的多个名字归到一条、
+ * 显示主名）。同一视频内按合并键去重，避免同人多名形被重复计数。不传则按原始取值计数。
+ */
+export function aggregateFacet(
+    videos: Video[],
+    type: FacetType,
+    resolve?: (name: string) => { key: string; display: string },
+): FacetValue[] {
+    const map = new Map<string, { display: string; count: number }>()
     for (const v of videos) {
+        // 仅在按簇合并时去重（同人多名形不重复计数）；无 resolver 时保持逐次计数的旧语义
+        const seen = resolve ? new Set<string>() : null
         for (const val of facetValuesOf(v, type)) {
-            map.set(val, (map.get(val) ?? 0) + 1)
+            const r = resolve ? resolve(val) : { key: val, display: val }
+            if (seen) {
+                if (seen.has(r.key)) continue
+                seen.add(r.key)
+            }
+            const cur = map.get(r.key)
+            if (cur) cur.count++
+            else map.set(r.key, { display: r.display, count: 1 })
         }
     }
-    return [...map.entries()].map(([name, count]) => ({ name, count }))
+    return [...map.values()].map((e) => ({ name: e.display, count: e.count }))
 }

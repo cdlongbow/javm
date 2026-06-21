@@ -65,6 +65,15 @@ pub async fn entity_alias_expand(
     .await
 }
 
+/// 列出某类型下所有「多名字实体簇」：前端列表据此把同一实体的多个名字合并为一条、显示主名。
+#[tauri::command]
+pub async fn entity_alias_clusters(
+    app: AppHandle,
+    entity_type: String,
+) -> Result<Vec<super::AliasCluster>, String> {
+    with_conn(app, move |conn| super::clusters(conn, &entity_type)).await
+}
+
 /// 查看某实体背后的原始证据（清洗 UI 据此判断要清掉哪个源/番号）。
 #[tauri::command]
 pub async fn entity_alias_inspect(

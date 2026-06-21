@@ -421,6 +421,7 @@ pub fn run() {
             metatube::commands::metatube_download_latest,
             // 跨语言别名
             entity_alias::commands::entity_alias_expand,
+            entity_alias::commands::entity_alias_clusters,
             entity_alias::commands::entity_alias_inspect,
             entity_alias::commands::entity_alias_purge_source,
             entity_alias::commands::entity_alias_rebuild,

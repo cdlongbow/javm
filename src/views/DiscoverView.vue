@@ -47,11 +47,57 @@ const fetchActors = async () => {
         console.error('获取演员失败:', e)
     }
 }
-const actorAvatarSrc = (name: string): string | null => {
+// 演员别名簇：把同一人的多个名字在列表里合并为一条（显示主名 canonical）
+interface AliasCluster {
+    entityId: number
+    canonical: string
+    names: string[]
+}
+const actorClusters = ref<AliasCluster[]>([])
+const fetchActorClusters = async () => {
+    try {
+        actorClusters.value = await invoke<AliasCluster[]>('entity_alias_clusters', {
+            entityType: 'actor',
+        })
+    } catch (e) {
+        console.error('获取演员别名簇失败:', e)
+        actorClusters.value = []
+    }
+}
+// 名字 → { key: 簇标识, display: 主名 }；不在簇里的名字回退自身
+const actorNameResolve = computed(() => {
+    const m = new Map<string, { key: string; display: string }>()
+    for (const c of actorClusters.value) {
+        const key = `actor#${c.entityId}`
+        for (const n of c.names) m.set(n, { key, display: c.canonical })
+    }
+    return m
+})
+// 主名 → 簇内全部名字（头像回退 / 按别名搜索 / 批量取 id 用）
+const canonicalToNames = computed(() => {
+    const m = new Map<string, string[]>()
+    for (const c of actorClusters.value) m.set(c.canonical, c.names)
+    return m
+})
+
+const avatarByName = (name: string): string | null => {
     const a = actorMap.value.get(name)
     if (!a) return null
     if (a.avatarPath) return convertFileSrc(a.avatarPath)
     if (a.avatarUrl) return a.avatarUrl
+    return null
+}
+const actorAvatarSrc = (name: string): string | null => {
+    const direct = avatarByName(name)
+    if (direct) return direct
+    // 合并显示的是主名，头像可能当初收割在别名下 → 回退簇内其它名字
+    const names = canonicalToNames.value.get(name)
+    if (names) {
+        for (const n of names) {
+            const a = avatarByName(n)
+            if (a) return a
+        }
+    }
     return null
 }
 const hideBrokenImg = (e: Event) => {
@@ -90,6 +136,7 @@ const applyRouteFacet = () => {
 onMounted(() => {
     if (videoStore.videos.length === 0) videoStore.fetchVideos()
     fetchActors()
+    fetchActorClusters()
     applyRouteFacet()
 })
 
@@ -111,9 +158,23 @@ const currentFacetLabel = computed(
 
 // 分面值列表（本地库派生 + 搜索 + 收藏过滤 + 排序；收藏的恒靠前）
 const facetValues = computed(() => {
-    let arr = aggregateFacet(videoStore.videos, facetType.value)
+    // 演员维度：按别名簇合并（同一人多名形归一条、显示主名）
+    const resolve =
+        facetType.value === 'actor'
+            ? (name: string) => actorNameResolve.value.get(name) ?? { key: name, display: name }
+            : undefined
+    let arr = aggregateFacet(videoStore.videos, facetType.value, resolve)
     const kw = search.value.trim().toLowerCase()
-    if (kw) arr = arr.filter((x) => x.name.toLowerCase().includes(kw))
+    if (kw)
+        arr = arr.filter((x) => {
+            if (x.name.toLowerCase().includes(kw)) return true
+            // 演员：合并后显示主名，按别名也要能搜到
+            if (facetType.value === 'actor') {
+                const names = canonicalToNames.value.get(x.name)
+                if (names && names.some((n) => n.toLowerCase().includes(kw))) return true
+            }
+            return false
+        })
     const favs = favoritesStore.favoriteSet(facetType.value)
     if (showFavoritesOnly.value) arr = arr.filter((x) => favs.has(x.name))
     arr.sort((a, b) => {

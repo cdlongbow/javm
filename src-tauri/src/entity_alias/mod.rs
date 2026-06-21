@@ -185,6 +185,61 @@ pub fn expand(
     Ok(rows)
 }
 
+/// 一个实体簇（含 ≥2 个名字）：供前端列表把同一实体的多个名字合并成一条、显示主名。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AliasCluster {
+    pub entity_id: i64,
+    /// 主名（展示名）：canonical 标记的名字
+    pub canonical: String,
+    /// 簇内全部名字（含主名）
+    pub names: Vec<String>,
+}
+
+/// 列出某类型下所有「含 ≥2 个名字」的实体簇。单名实体无需合并，省略以减小载荷。
+pub fn clusters(conn: &Connection, entity_type: &str) -> rusqlite::Result<Vec<AliasCluster>> {
+    let mut stmt = conn.prepare(
+        "SELECT entity_id, name, is_canonical FROM entity_aliases
+         WHERE entity_type = ?1 ORDER BY entity_id",
+    )?;
+    let rows = stmt
+        .query_map(params![entity_type], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? != 0,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // 已按 entity_id 排序，逐段（同一 id 的连续行）聚成一簇
+    let mut out: Vec<AliasCluster> = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        let eid = rows[i].0;
+        let mut names: Vec<String> = Vec::new();
+        let mut canonical: Option<String> = None;
+        while i < rows.len() && rows[i].0 == eid {
+            let (_, name, is_canon) = &rows[i];
+            if *is_canon && canonical.is_none() {
+                canonical = Some(name.clone());
+            }
+            names.push(name.clone());
+            i += 1;
+        }
+        if names.len() < 2 {
+            continue;
+        }
+        let canonical = canonical.unwrap_or_else(|| names[0].clone());
+        out.push(AliasCluster {
+            entity_id: eid,
+            canonical,
+            names,
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
