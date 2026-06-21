@@ -5,24 +5,84 @@ import { listen } from '@tauri-apps/api/event'
 import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Loader2, Download } from 'lucide-vue-next'
+import { Loader2, Download, Star, Pencil, X, Check } from 'lucide-vue-next'
+import { Input } from '@/components/ui/input'
 import type { Video } from '@/types'
-import { dmmCoverUrl, dmmMonoCoverUrl } from '@/utils/dmm'
-import { useSettingsStore } from '@/stores'
+import { dmmCoverUrl, dmmMonoCoverUrl, isDmmPlaceholderSize, isDmmImageUrl } from '@/utils/dmm'
+import { useSettingsStore, useFavoritesStore } from '@/stores'
 
 const settingsStore = useSettingsStore()
+const favoritesStore = useFavoritesStore()
 
+// 收藏（按演员名）
+const isFav = computed(() => favoritesStore.isFavorite('actor', props.actorName))
+const toggleFav = () => favoritesStore.toggle('actor', props.actorName)
+// 生日：截到日期、过滤零值（0001 等）。MetaTube 未知生日会回零值，需整规
+const birthdayText = computed(() => {
+    const raw = profile.value?.birthday
+    const m = raw?.match(/(\d{4})-(\d{2})-(\d{2})/)
+    if (!m || parseInt(m[1], 10) < 1900) return ''
+    return `${m[1]}-${m[2]}-${m[3]}`
+})
+
+interface AliasRow {
+    name: string
+    lang: string
+    isCanonical: boolean
+}
 interface Props {
     actorId: number | null
     actorName: string
     localVideos: Video[]
+    // 该演员跨语言别名（中文/英文/日文/曾用名），由父组件经 entity_alias_expand 取得
+    aliases?: AliasRow[]
 }
 const props = defineProps<Props>()
 const emit = defineEmits<{
     (e: 'open-video', videoId: string): void
     (e: 'open-missing', payload: { code: string; title: string; cover: string; hasData: boolean }): void
     (e: 'refreshed'): void
+    (e: 'aliases-changed'): void
 }>()
+
+// 多名字：展示（只读，不跳转）+ 编辑（加=归并、删=拉黑，均经 entity_alias 重建）
+const aliasEditing = ref(false)
+const newAlias = ref('')
+const aliasBusy = ref(false)
+const allAliases = computed<AliasRow[]>(() => props.aliases ?? [])
+// 除当前查看名外的其它名字（展示态只列其它名，当前名已在标题）
+const otherAliases = computed(() => allAliases.value.filter((a) => a.name !== props.actorName))
+const addAlias = async () => {
+    const name = newAlias.value.trim()
+    if (!name || aliasBusy.value) return
+    aliasBusy.value = true
+    try {
+        await invoke('entity_alias_force_merge', {
+            entityType: 'actor',
+            names: [props.actorName, name],
+        })
+        newAlias.value = ''
+        emit('aliases-changed')
+        toast.success('已添加名字')
+    } catch (e) {
+        toast.error('添加失败: ' + String(e))
+    } finally {
+        aliasBusy.value = false
+    }
+}
+const removeAlias = async (name: string) => {
+    if (aliasBusy.value || name === props.actorName) return
+    aliasBusy.value = true
+    try {
+        await invoke('entity_alias_block', { entityType: 'actor', name })
+        emit('aliases-changed')
+        toast.success('已移除名字')
+    } catch (e) {
+        toast.error('移除失败: ' + String(e))
+    } finally {
+        aliasBusy.value = false
+    }
+}
 
 interface ActorProfile {
     avatarPath?: string | null
@@ -77,6 +137,7 @@ watch(
     () => {
         activeTab.value = 'all'
         loadDetail()
+        favoritesStore.load('actor')
     },
     { immediate: true },
 )
@@ -182,7 +243,8 @@ const displayCards = computed<Card[]>(() => {
 
 const onCardClick = (c: Card) => {
     if (c.videoId) emit('open-video', c.videoId)
-    // 已有封面 → 直接展示不刮削；无封面 → 开即自动刮削补全
+    // 已有封面 → 直接展示不刮削；无封面 → 开即自动刮削补全。
+    // 带上卡片当前封面（含 DMM 兜底）供详情展示；DMM 占位图由详情页按尺寸识别后清空再刮削补
     else if (c.code)
         emit('open-missing', {
             code: c.code,
@@ -210,6 +272,14 @@ const persistCardSize = () => {
 }
 const hideBrokenImg = (e: Event) => {
     ;(e.target as HTMLImageElement).style.visibility = 'hidden'
+}
+
+// 封面加载成功但其实是 DMM 占位图（now_printing / noimage，封面不存在时 302 跳过去的）：
+// 按固定尺寸精准识别，当成加载失败处理，走 digital→mono→隐藏 兜底，不把占位图当有效封面。
+const onCoverLoad = (e: Event, code: string) => {
+    const img = e.target as HTMLImageElement
+    const src = img.currentSrc || img.src || ''
+    if (isDmmImageUrl(src) && isDmmPlaceholderSize(img.naturalWidth, img.naturalHeight)) onCoverError(e, code)
 }
 
 // 作品封面加载失败 → 依次尝试 DMM digital → mono → 隐藏。
@@ -245,9 +315,67 @@ const onCoverError = (e: Event, code: string) => {
                 />
             </div>
             <div class="min-w-0 flex-1">
-                <div class="text-lg font-semibold">{{ actorName }}</div>
+                <div class="flex items-center gap-2">
+                    <span class="text-lg font-semibold">{{ actorName }}</span>
+                    <button
+                        type="button"
+                        class="shrink-0 text-muted-foreground transition hover:text-yellow-500"
+                        :class="isFav ? 'text-yellow-500' : ''"
+                        title="收藏演员"
+                        @click="toggleFav"
+                    >
+                        <Star class="size-5" :fill="isFav ? 'currentColor' : 'none'" />
+                    </button>
+                    <button
+                        type="button"
+                        class="shrink-0 text-muted-foreground transition hover:text-primary"
+                        :class="aliasEditing ? 'text-primary' : ''"
+                        title="编辑名字"
+                        @click="aliasEditing = !aliasEditing"
+                    >
+                        <component :is="aliasEditing ? Check : Pencil" class="size-4" />
+                    </button>
+                </div>
+
+                <!-- 多名字：展示态（只读，不跳转） -->
+                <div v-if="!aliasEditing && otherAliases.length" class="mt-1 flex flex-wrap items-center gap-1">
+                    <span
+                        v-for="a in otherAliases"
+                        :key="a.name"
+                        class="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+                    >{{ a.name }}</span>
+                </div>
+                <!-- 多名字：编辑态（加=归并、删=拉黑；属于任一名字的视频都归到本演员） -->
+                <div v-if="aliasEditing" class="mt-1 flex flex-wrap items-center gap-1">
+                    <span
+                        v-for="a in allAliases"
+                        :key="a.name"
+                        class="flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-xs"
+                        :class="a.name === actorName ? 'text-foreground' : 'text-muted-foreground'"
+                    >
+                        {{ a.name }}
+                        <button
+                            v-if="a.name !== actorName"
+                            type="button"
+                            class="text-muted-foreground hover:text-destructive"
+                            :disabled="aliasBusy"
+                            title="移除"
+                            @click="removeAlias(a.name)"
+                        >
+                            <X class="size-3" />
+                        </button>
+                    </span>
+                    <Input
+                        v-model="newAlias"
+                        class="h-6 w-28 text-xs"
+                        placeholder="添加名字"
+                        :disabled="aliasBusy"
+                        @keyup.enter="addAlias"
+                    />
+                </div>
+
                 <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
-                    <span v-if="profile?.birthday">生日 {{ profile.birthday }}</span>
+                    <span v-if="birthdayText">生日 {{ birthdayText }}</span>
                     <span v-if="profile?.height">身高 {{ profile.height }}cm</span>
                     <span v-if="profile?.cup">罩杯 {{ profile.cup }}</span>
                     <span v-if="measurements">三围 {{ measurements }}</span>
@@ -331,6 +459,7 @@ const onCoverError = (e: Event, code: string) => {
                             referrerpolicy="no-referrer"
                             loading="lazy"
                             class="size-full object-cover transition group-hover:scale-105"
+                            @load="onCoverLoad($event, c.code)"
                             @error="onCoverError($event, c.code)"
                         />
                         <span

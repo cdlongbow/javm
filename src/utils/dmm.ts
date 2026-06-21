@@ -29,3 +29,20 @@ export function dmmMonoCoverUrl(code?: string | null): string | null {
     const cid = dmmCid(code)
     return cid ? `https://pics.dmm.co.jp/mono/movie/adult/${cid}/${cid}pl.jpg` : null
 }
+
+/**
+ * 识别 DMM「占位图」（封面不存在时 302 跳转到的固定图，浏览器跟随跳转后会显示出来）：
+ * - digital → `now_printing.jpg` 590×800
+ * - mono → noimage `adult_pl.jpg` 90×122
+ *
+ * 这两个尺寸是 DMM 占位图的固定特征，正常横版封面不会是这两个尺寸，故按尺寸精准命中即视为无封面。
+ */
+export function isDmmPlaceholderSize(w?: number | null, h?: number | null): boolean {
+    if (!w || !h) return false
+    return (w === 590 && h === 800) || (w === 90 && h === 122)
+}
+
+/** 是否 DMM 图片 URL（占位图识别只对 DMM 源生效，避免误伤本地/数据源真封面） */
+export function isDmmImageUrl(src?: string | null): boolean {
+    return !!src && /dmm\.(co\.jp|com)/i.test(src)
+}

@@ -5,12 +5,17 @@ import { listen } from '@tauri-apps/api/event'
 import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Loader2, Download } from 'lucide-vue-next'
+import { Loader2, Download, Star } from 'lucide-vue-next'
 import type { Video } from '@/types'
-import { dmmCoverUrl, dmmMonoCoverUrl } from '@/utils/dmm'
-import { useSettingsStore } from '@/stores'
+import { dmmCoverUrl, dmmMonoCoverUrl, isDmmPlaceholderSize, isDmmImageUrl } from '@/utils/dmm'
+import { useSettingsStore, useFavoritesStore } from '@/stores'
 
 const settingsStore = useSettingsStore()
+const favoritesStore = useFavoritesStore()
+
+// 收藏（按维度类型 + 取值名）
+const isFav = computed(() => favoritesStore.isFavorite(props.facetType, props.facetName))
+const toggleFav = () => favoritesStore.toggle(props.facetType, props.facetName)
 
 interface Props {
     facetType: 'studio' | 'series' | 'director'
@@ -59,6 +64,7 @@ watch(
     () => {
         activeTab.value = 'all'
         loadDetail()
+        favoritesStore.load(props.facetType)
     },
     { immediate: true },
 )
@@ -157,7 +163,8 @@ const displayCards = computed<Card[]>(() => {
 
 const onCardClick = (c: Card) => {
     if (c.videoId) emit('open-video', c.videoId)
-    // 已有封面 → 直接展示不刮削；无封面 → 开即自动刮削补全
+    // 已有封面 → 直接展示不刮削；无封面 → 开即自动刮削补全。
+    // 带上卡片当前封面（含 DMM 兜底）供详情展示；DMM 占位图由详情页按尺寸识别后清空再刮削补
     else if (c.code)
         emit('open-missing', {
             code: c.code,
@@ -165,6 +172,12 @@ const onCardClick = (c: Card) => {
             cover: c.coverSrc ?? '',
             hasData: c.hasStoredCover,
         })
+}
+// 封面加载成功但其实是 DMM 占位图：按固定尺寸精准识别，当加载失败走兜底，不当有效封面
+const onCoverLoad = (e: Event, code: string) => {
+    const img = e.target as HTMLImageElement
+    const src = img.currentSrc || img.src || ''
+    if (isDmmImageUrl(src) && isDmmPlaceholderSize(img.naturalWidth, img.naturalHeight)) onCoverError(e, code)
 }
 const onCoverError = (e: Event, code: string) => {
     const img = e.target as HTMLImageElement
@@ -188,7 +201,18 @@ const onCoverError = (e: Event, code: string) => {
         <!-- 头部：名称 + 计数 + 抓取全集 -->
         <div class="flex items-center gap-3 border-b p-4">
             <div class="min-w-0 flex-1">
-                <div class="truncate text-lg font-semibold">{{ facetName }}</div>
+                <div class="flex items-center gap-2">
+                    <span class="truncate text-lg font-semibold">{{ facetName }}</span>
+                    <button
+                        type="button"
+                        class="shrink-0 text-muted-foreground transition hover:text-yellow-500"
+                        :class="isFav ? 'text-yellow-500' : ''"
+                        title="收藏"
+                        @click="toggleFav"
+                    >
+                        <Star class="size-5" :fill="isFav ? 'currentColor' : 'none'" />
+                    </button>
+                </div>
                 <div class="mt-0.5 text-sm text-muted-foreground">
                     <template v-if="hasWorks">
                         全集 {{ works.length }} 部 · 本地 {{ localCount }} · 缺失 {{ missingCount }}
@@ -262,6 +286,7 @@ const onCoverError = (e: Event, code: string) => {
                             referrerpolicy="no-referrer"
                             loading="lazy"
                             class="size-full object-cover transition group-hover:scale-105"
+                            @load="onCoverLoad($event, c.code)"
                             @error="onCoverError($event, c.code)"
                         />
                         <span

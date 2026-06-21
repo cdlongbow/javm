@@ -11,6 +11,7 @@ import {
     Search,
     ArrowDownAZ,
     ArrowDown01,
+    Star,
 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -21,11 +22,12 @@ import VideoDetailDialog from '@/components/VideoDetailDialog.vue'
 import ScrapeDialog from '@/components/ScrapeDialog.vue'
 import ActorDetailPanel from '@/components/ActorDetailPanel.vue'
 import FacetDetailPanel from '@/components/FacetDetailPanel.vue'
-import { useVideoStore } from '@/stores'
+import { useVideoStore, useFavoritesStore } from '@/stores'
 import type { Video } from '@/types'
 import { FACET_TYPES, type FacetType, facetValuesOf, aggregateFacet } from '@/utils/facet'
 
 const videoStore = useVideoStore()
+const favoritesStore = useFavoritesStore()
 
 // 演员头像（刮削时从详情页 .avatar-box 收割写入 actors 表）
 interface ActorInfo {
@@ -60,6 +62,10 @@ const facetType = ref<FacetType>('actor')
 const selectedValue = ref<string | null>(null)
 const search = ref('')
 const sortByCount = ref(true) // true=按作品数, false=按名称
+const showFavoritesOnly = ref(false) // 只看收藏
+
+const isFav = (name: string) => favoritesStore.isFavorite(facetType.value, name)
+const toggleFavorite = (name: string) => favoritesStore.toggle(facetType.value, name)
 
 const ICONS: Record<FacetType, any> = {
     studio: Building2,
@@ -90,6 +96,9 @@ onMounted(() => {
 // 已在发现页时再次点击 tag（同路由仅 query 变化）也要响应
 watch(() => route.query, applyRouteFacet)
 
+// 切换维度即加载该维度的收藏集合（含首次）
+watch(facetType, (t) => favoritesStore.load(t), { immediate: true })
+
 const switchFacet = (t: FacetType) => {
     facetType.value = t
     selectedValue.value = null
@@ -100,22 +109,62 @@ const currentFacetLabel = computed(
     () => FACET_TYPES.find((f) => f.type === facetType.value)?.label ?? '',
 )
 
-// 分面值列表（本地库派生 + 搜索 + 排序）
+// 分面值列表（本地库派生 + 搜索 + 收藏过滤 + 排序；收藏的恒靠前）
 const facetValues = computed(() => {
     let arr = aggregateFacet(videoStore.videos, facetType.value)
     const kw = search.value.trim().toLowerCase()
     if (kw) arr = arr.filter((x) => x.name.toLowerCase().includes(kw))
-    arr.sort((a, b) =>
-        sortByCount.value
+    const favs = favoritesStore.favoriteSet(facetType.value)
+    if (showFavoritesOnly.value) arr = arr.filter((x) => favs.has(x.name))
+    arr.sort((a, b) => {
+        const fa = favs.has(a.name) ? 1 : 0
+        const fb = favs.has(b.name) ? 1 : 0
+        if (fa !== fb) return fb - fa // 收藏靠前
+        return sortByCount.value
             ? b.count - a.count || a.name.localeCompare(b.name, 'zh-CN')
-            : a.name.localeCompare(b.name, 'zh-CN'),
-    )
+            : a.name.localeCompare(b.name, 'zh-CN')
+    })
     return arr
 })
 
-// 分面详情：归属该取值的作品
+// 选中演员的跨语言别名（中文/英文/日文/曾用名），用于把属于任一别名的视频都归到该演员
+interface AliasRow {
+    name: string
+    lang: string
+    isCanonical: boolean
+}
+const selectedAliasRows = ref<AliasRow[]>([])
+const selectedAliasNames = computed(() => selectedAliasRows.value.map((a) => a.name))
+const loadActorAliases = async (name: string) => {
+    try {
+        const res = await invoke<{ aliases: AliasRow[] }>('entity_alias_expand', {
+            entityType: 'actor',
+            name,
+        })
+        selectedAliasRows.value = res.aliases ?? []
+    } catch (e) {
+        console.error('获取演员别名失败:', e)
+        selectedAliasRows.value = []
+    }
+}
+watch(
+    [facetType, selectedValue],
+    ([ft, sv]) => {
+        if (ft === 'actor' && sv) loadActorAliases(sv)
+        else selectedAliasRows.value = []
+    },
+    { immediate: true },
+)
+
+// 分面详情：归属该取值的作品。演员维度按「任一别名」匹配，把多名字的视频都收进来
 const detailVideos = computed<Video[]>(() => {
     if (!selectedValue.value) return []
+    if (facetType.value === 'actor' && selectedAliasNames.value.length > 0) {
+        const names = new Set(selectedAliasNames.value)
+        return videoStore.videos.filter((v) =>
+            facetValuesOf(v, 'actor').some((n) => names.has(n)),
+        )
+    }
     return videoStore.videos.filter((v) =>
         facetValuesOf(v, facetType.value).includes(selectedValue.value!),
     )
@@ -157,12 +206,18 @@ const handleScrape = (video: Video) => {
     scrapeDialogRef.value?.open(video)
 }
 
-// 演员详情面板：当前选中演员的 id（用于抓取档案/全集）
-const selectedActorId = computed<number | null>(() =>
-    facetType.value === 'actor' && selectedValue.value
-        ? actorMap.value.get(selectedValue.value)?.id ?? null
-        : null,
-)
+// 演员详情面板：当前选中演员的 id（用于抓取档案/全集）。
+// 先按选中名，再按任一别名解析到 actors 表 id —— 点别名也能定位到同一演员档案/全集。
+const selectedActorId = computed<number | null>(() => {
+    if (facetType.value !== 'actor' || !selectedValue.value) return null
+    const direct = actorMap.value.get(selectedValue.value)?.id
+    if (direct != null) return direct
+    for (const n of selectedAliasNames.value) {
+        const id = actorMap.value.get(n)?.id
+        if (id != null) return id
+    }
+    return null
+})
 const openVideoById = (videoId: string) => {
     const v = videoStore.videos.find((x) => x.id === videoId)
     if (v) handleVideoSelect(v)
@@ -204,6 +259,17 @@ const handleWorkMetaSaved = () => {
                     <component :is="sortByCount ? ArrowDown01 : ArrowDownAZ" class="size-4" />
                     {{ sortByCount ? '作品数' : '名称' }}
                 </Button>
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    class="h-8 gap-1"
+                    :class="showFavoritesOnly ? 'text-yellow-500' : ''"
+                    title="只看收藏"
+                    @click="showFavoritesOnly = !showFavoritesOnly"
+                >
+                    <Star class="size-4" :fill="showFavoritesOnly ? 'currentColor' : 'none'" />
+                    收藏
+                </Button>
             </div>
         </div>
 
@@ -217,10 +283,10 @@ const handleWorkMetaSaved = () => {
             </div>
             <ScrollArea v-else class="min-h-0 flex-1">
                 <div class="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3 p-4">
-                    <button
+                    <div
                         v-for="fv in facetValues"
                         :key="fv.name"
-                        class="flex items-center gap-2 rounded-lg border bg-card p-3 text-left transition hover:border-primary hover:bg-accent"
+                        class="flex cursor-pointer items-center gap-2 rounded-lg border bg-card p-3 text-left transition hover:border-primary hover:bg-accent"
                         @click="selectedValue = fv.name"
                     >
                         <img
@@ -235,7 +301,16 @@ const handleWorkMetaSaved = () => {
                         <span
                             class="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs tabular-nums text-muted-foreground"
                         >{{ fv.count }}</span>
-                    </button>
+                        <button
+                            type="button"
+                            class="shrink-0 text-muted-foreground transition hover:text-yellow-500"
+                            :class="isFav(fv.name) ? 'text-yellow-500' : ''"
+                            title="收藏"
+                            @click.stop="toggleFavorite(fv.name)"
+                        >
+                            <Star class="size-4" :fill="isFav(fv.name) ? 'currentColor' : 'none'" />
+                        </button>
+                    </div>
                 </div>
             </ScrollArea>
         </template>
@@ -258,9 +333,11 @@ const handleWorkMetaSaved = () => {
                 :actor-id="selectedActorId"
                 :actor-name="selectedValue!"
                 :local-videos="detailVideos"
+                :aliases="selectedAliasRows"
                 @open-video="openVideoById"
                 @open-missing="openMissing"
                 @refreshed="fetchActors"
+                @aliases-changed="selectedValue && loadActorAliases(selectedValue)"
             />
             <FacetDetailPanel
                 v-else-if="facetType === 'studio' || facetType === 'series' || facetType === 'director'"

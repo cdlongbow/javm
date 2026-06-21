@@ -53,12 +53,23 @@ fn parse_measurements(s: &str) -> (Option<i32>, Option<i32>, Option<i32>) {
     (grab('B'), grab('W'), grab('H'))
 }
 
+/// 规整生日：取日期部分（截到 'T' 前），年份 < 1900 视为零值/无效 → None。
+/// MetaTube 对未知生日返回 "0001-01-01T00:00:00Z" 之类零值，需过滤，否则前端显示成乱日期。
+fn normalize_birthday(raw: &str) -> Option<String> {
+    let date = raw.trim().split('T').next().unwrap_or("").trim();
+    let year: i32 = date.split('-').next().and_then(|y| y.parse().ok()).unwrap_or(0);
+    if year < 1900 {
+        return None;
+    }
+    Some(date.to_string())
+}
+
 /// MetaTube ActorInfo → 演员档案入参（头像取首图，三围从 measurements 解析）。
 fn actor_info_to_profile(info: &crate::metatube::types::ActorInfo) -> crate::db::ActorProfileInput {
     let (bust, waist, hip) = parse_measurements(&info.measurements);
     crate::db::ActorProfileInput {
         avatar_url: info.images.iter().find(|s| !s.trim().is_empty()).cloned(),
-        birthday: non_empty(&info.birthday),
+        birthday: normalize_birthday(&info.birthday),
         height: (info.height > 0).then_some(info.height as i32),
         cup: non_empty(&info.cup_size),
         bust,
@@ -530,4 +541,25 @@ pub async fn save_scraped_work_meta(
     let conn = db.get_connection()?;
     Database::save_scraped_work_meta(&conn, &code, &title, &cover_url)?;
     Ok(())
+}
+
+/// 切换某维度取值（演员/片商/系列/导演/分类）的收藏态，返回切换后的收藏态（true=已收藏）。
+#[tauri::command]
+pub async fn toggle_favorite(
+    entity_type: String,
+    name: String,
+    db: State<'_, Database>,
+) -> AppResult<bool> {
+    let conn = db.get_connection()?;
+    Ok(Database::toggle_favorite(&conn, &entity_type, &name)?)
+}
+
+/// 某维度类型下的全部收藏取值名（按收藏时间倒序）。
+#[tauri::command]
+pub async fn list_favorites(
+    entity_type: String,
+    db: State<'_, Database>,
+) -> AppResult<Vec<String>> {
+    let conn = db.get_connection()?;
+    Ok(Database::list_favorites(&conn, &entity_type)?)
 }

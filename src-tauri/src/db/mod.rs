@@ -247,6 +247,18 @@ impl Database {
             [],
         )?;
 
+        // 收藏：按（维度类型, 取值名）记一条。维度值列表是按名聚合派生的，故收藏也按名归属，
+        // 演员/片商/系列/导演/分类 五类统一。entity_type ∈ actor/studio/series/director/genre。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS favorites (
+                entity_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (entity_type, name)
+            )",
+            [],
+        )?;
+
         // 跨语言别名表（覆盖 actor/studio/tag）：同一实体的多语言/多写法名归并到同一
         // entity_id（按 entity_type 各自独立的合成簇 id）。name_norm 为归一化匹配键。
         conn.execute(
@@ -694,6 +706,12 @@ impl Database {
             )?;
         }
 
+        // 新视频（番号）入库 → 把全集里同番号的缺失作品回填为本地（演员/维度面板即时转本地）。
+        // 副作用，失败不应阻断维度同步本身（如全集表尚未建/异常），best-effort。
+        if let Some(code) = local_id.map(str::trim).filter(|s| !s.is_empty()) {
+            let _ = Self::relink_works_for_code(conn, code, video_id);
+        }
+
         Ok(())
     }
 
@@ -805,6 +823,65 @@ impl Database {
                  updated_at = CURRENT_TIMESTAMP
              WHERE facet_type = ?1 AND facet_id = ?2 AND status IN ('local', 'missing')",
             params![facet_type, facet_id],
+        )?;
+        Ok(affected)
+    }
+
+    /// 切换收藏（不存在则加、存在则删），返回切换后的收藏态（true=已收藏）。
+    pub fn toggle_favorite(conn: &Connection, entity_type: &str, name: &str) -> Result<bool> {
+        let name = name.trim();
+        let exists = conn
+            .query_row(
+                "SELECT 1 FROM favorites WHERE entity_type = ?1 AND name = ?2",
+                params![entity_type, name],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if exists {
+            conn.execute(
+                "DELETE FROM favorites WHERE entity_type = ?1 AND name = ?2",
+                params![entity_type, name],
+            )?;
+            Ok(false)
+        } else {
+            conn.execute(
+                "INSERT OR IGNORE INTO favorites (entity_type, name) VALUES (?1, ?2)",
+                params![entity_type, name],
+            )?;
+            Ok(true)
+        }
+    }
+
+    /// 某维度类型下的全部收藏取值名（按收藏时间倒序）。
+    pub fn list_favorites(conn: &Connection, entity_type: &str) -> Result<Vec<String>> {
+        let mut stmt = conn.prepare(
+            "SELECT name FROM favorites WHERE entity_type = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![entity_type], |r| r.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    /// 新视频（番号）入库后：把全集里同番号的「缺失」作品回填为本地（演员 + 维度全集一并处理）。
+    ///
+    /// 仅触碰 `local`/`missing` 行，不干扰下载中等中间态。下载/扫描入库后，演员/维度面板里
+    /// 这部作品即从「缺失」转「本地」并关联到该视频，无需重新抓取全集。
+    pub fn relink_works_for_code(conn: &Connection, code: &str, video_id: &str) -> Result<usize> {
+        let code = code.trim();
+        if code.is_empty() {
+            return Ok(0);
+        }
+        let mut affected = conn.execute(
+            "UPDATE actor_works
+             SET local_video_id = ?2, status = 'local', updated_at = CURRENT_TIMESTAMP
+             WHERE UPPER(TRIM(code)) = UPPER(TRIM(?1)) AND status IN ('local', 'missing')",
+            params![code, video_id],
+        )?;
+        affected += conn.execute(
+            "UPDATE facet_works
+             SET local_video_id = ?2, status = 'local', updated_at = CURRENT_TIMESTAMP
+             WHERE UPPER(TRIM(code)) = UPPER(TRIM(?1)) AND status IN ('local', 'missing')",
+            params![code, video_id],
         )?;
         Ok(affected)
     }

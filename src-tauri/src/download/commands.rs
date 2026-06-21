@@ -33,6 +33,7 @@ fn upsert_downloaded_video_record(conn: &rusqlite::Connection, video_path: &std:
         .map(|metadata| metadata.len() as i64)
         .unwrap_or(0);
     let now = chrono::Utc::now().to_rfc3339();
+    let video_id = Uuid::new_v4().to_string();
 
     conn.execute(
         "INSERT INTO videos (
@@ -40,7 +41,7 @@ fn upsert_downloaded_video_record(conn: &rusqlite::Connection, video_path: &std:
             file_size, scan_status, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rusqlite::params![
-            Uuid::new_v4().to_string(),
+            video_id,
             file_stem,
             file_stem,
             file_stem,
@@ -53,6 +54,12 @@ fn upsert_downloaded_video_record(conn: &rusqlite::Connection, video_path: &std:
         ],
     )
     .map_err(|e| format!("插入下载视频记录失败: {}", e))?;
+
+    // 下载入库即把全集里同番号的缺失作品回填为本地（演员/维度面板即时从「缺失」转「本地」，无需等刮削）
+    let code = crate::utils::designation_recognizer::DesignationRecognizer::new()
+        .recognize_with_regex(file_stem)
+        .unwrap_or_else(|| file_stem.to_string());
+    let _ = Database::relink_works_for_code(conn, &code, &video_id);
 
     Ok(())
 }

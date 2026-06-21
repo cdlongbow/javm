@@ -52,6 +52,7 @@ import { useVideoStore } from '@/stores'
 import { useResourceScrapeStore } from '@/stores/resourceScrape'
 import { useSettingsStore } from '@/stores/settings'
 import { invoke } from '@tauri-apps/api/core'
+import { isDmmPlaceholderSize, isDmmImageUrl } from '@/utils/dmm'
 import CaptureCoverDialog from './CaptureCoverDialog.vue'
 import ImageFetchDialog from './ImageFetchDialog.vue'
 import DeleteVideoDialog from './DeleteVideoDialog.vue'
@@ -496,6 +497,18 @@ const openManualScrape = () => {
         videoPath: currentVideoPath.value,
     })
 }
+// 详情封面其实是 DMM 占位图（缺失卡兜底，封面不存在时 302 跳过去的）：按固定尺寸精准识别后清空，
+// 详情页不显示占位图；imageSrc 随之变空 → 一键刮削视为"无封面"，会去数据源刮真封面替换。
+const onCoverImgLoad = (e: Event) => {
+    const img = e.target as HTMLImageElement
+    const src = img.currentSrc || img.src || ''
+    if (isDmmImageUrl(src) && isDmmPlaceholderSize(img.naturalWidth, img.naturalHeight)) {
+        pendingPosterSource.value = undefined
+        pendingRemoteCoverUrl.value = ''
+        if (formData.value.poster) formData.value.poster = ''
+    }
+}
+
 // 点击 导演/制作商/类别/演员 的 tag：关闭详情，跳到发现页对应维度并选中该取值
 const goToFacet = (payload: { facetType: string; value: string }) => {
     if (!payload.value?.trim()) return
@@ -988,7 +1001,7 @@ const downloadLongScreenshot = async () => {
                                     @click="imageSrc && openImageViewer(0)">
                                     <img v-if="imageSrc" :src="imageSrc"
                                         class="w-full h-auto object-contain max-h-[280px]"
-                                        referrerPolicy="no-referrer" />
+                                        referrerPolicy="no-referrer" @load="onCoverImgLoad" />
                                     <div v-else
                                         class="flex flex-col items-center justify-center text-muted-foreground p-8 gap-3">
                                         <ImageIcon class="size-12 opacity-20" />

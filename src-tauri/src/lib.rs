@@ -324,6 +324,8 @@ pub fn run() {
             actor::commands::fetch_facet_works,
             actor::commands::get_facet_detail,
             actor::commands::save_scraped_work_meta,
+            actor::commands::toggle_favorite,
+            actor::commands::list_favorites,
             video::commands::backfill_cover_dimensions,
             video::commands::get_duplicate_videos,
             video::commands::delete_video_db,
