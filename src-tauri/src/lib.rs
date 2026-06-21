@@ -324,6 +324,7 @@ pub fn run() {
             actor::commands::fetch_actor_profile,
             actor::commands::fetch_actors_profile_batch,
             actor::commands::cancel_actors_batch,
+            actor::commands::ensure_actor,
             actor::commands::get_actor_detail,
             actor::commands::cancel_actor_fetch,
             actor::commands::fetch_facet_works,

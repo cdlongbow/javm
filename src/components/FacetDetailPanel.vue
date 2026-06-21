@@ -22,6 +22,8 @@ interface Props {
     facetType: 'studio' | 'series' | 'director' | 'genre'
     facetName: string
     localVideos: Video[]
+    // 在线搜索进入：进面板即自动抓全集（无需手动点抓取）
+    autoFetch?: boolean
 }
 const props = defineProps<Props>()
 const emit = defineEmits<{
@@ -115,6 +117,15 @@ const cancelWorks = async () => {
         console.error('停止抓取失败:', e)
     }
 }
+
+// 在线搜索进入：取值就绪即自动在线抓全集（声明在 fetchWorks 之后，避免 TDZ）
+watch(
+    () => [props.facetType, props.facetName],
+    () => {
+        if (props.autoFetch && props.facetName) fetchWorks()
+    },
+    { immediate: true },
+)
 
 const hasWorks = computed(() => works.value.length > 0)
 const localCount = computed(() => works.value.filter((w) => w.status === 'local').length)

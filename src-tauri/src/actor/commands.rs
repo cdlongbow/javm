@@ -380,6 +380,17 @@ async fn run_actor_fetch(
     })
 }
 
+/// 按名取/建演员记录，返回 id。在线搜索用：库里没有的演员先建档，再按名抓档案/全集。
+#[tauri::command]
+pub async fn ensure_actor(name: String, db: State<'_, Database>) -> AppResult<i64> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::Business("演员名为空".to_string()));
+    }
+    let conn = db.get_connection()?;
+    Ok(Database::get_or_create_actor(&conn, trimmed)?)
+}
+
 /// 演员详情：档案 + 作品全集（本地有/缺失），供演员详情页渲染。
 #[tauri::command]
 pub async fn get_actor_detail(

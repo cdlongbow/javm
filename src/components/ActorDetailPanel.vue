@@ -36,6 +36,8 @@ interface Props {
     localVideos: Video[]
     // 该演员跨语言别名（中文/英文/日文/曾用名），由父组件经 entity_alias_expand 取得
     aliases?: AliasRow[]
+    // 在线搜索进入：进面板即自动抓档案/全集（无需手动点抓取）
+    autoFetch?: boolean
 }
 const props = defineProps<Props>()
 const emit = defineEmits<{
@@ -265,6 +267,15 @@ const cancelFetch = async () => {
         console.error('停止抓取失败:', e)
     }
 }
+
+// 在线搜索进入：actorId 就绪即自动在线抓档案/全集（声明在 fetchProfile 之后，避免 TDZ）
+watch(
+    () => props.actorId,
+    (id) => {
+        if (id && props.autoFetch) fetchProfile()
+    },
+    { immediate: true },
+)
 
 const hasWorks = computed(() => works.value.length > 0)
 const localCount = computed(() => works.value.filter((w) => w.status === 'local').length)

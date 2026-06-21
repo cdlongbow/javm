@@ -190,6 +190,32 @@ const facetValues = computed(() => {
     return arr
 })
 
+// 在线搜索：搜索词作为列表第一项，点击后进入该取值详情页并自动在线抓取（演员/片商/系列/导演/分类统一）
+const onlineFetchPending = ref(false)
+// 点击本地取值进详情：清掉在线抓取标记（避免点本地项也触发在线抓）
+const selectValue = (name: string) => {
+    onlineFetchPending.value = false
+    selectedValue.value = name
+}
+const enterOnlineSearch = async () => {
+    const q = search.value.trim()
+    if (!q) return
+    // 演员：库里没有就先按名建档拿到 id，详情页才能定位并抓档案/全集
+    if (facetType.value === 'actor') {
+        try {
+            const id = await invoke<number>('ensure_actor', { name: q })
+            // 合并写入：保留已有头像等字段，仅补 id（避免覆盖列表头像）
+            actorMap.value.set(q, { ...(actorMap.value.get(q) ?? { name: q }), id, name: q })
+        } catch (e) {
+            console.error('在线搜索建档失败:', e)
+            toast.error('在线搜索失败: ' + String(e))
+            return
+        }
+    }
+    onlineFetchPending.value = true
+    selectedValue.value = q
+}
+
 // 批量抓档案：对当前列表里的演员后台并发抓取档案/全集，进度经 actor-batch-progress 增量上报
 const batchRunning = ref(false)
 const batchProgress = ref<{
@@ -445,18 +471,28 @@ const handleWorkMetaSaved = () => {
         <!-- 分面值列表 -->
         <template v-if="!selectedValue">
             <div
-                v-if="facetValues.length === 0"
+                v-if="facetValues.length === 0 && !search.trim()"
                 class="flex flex-1 items-center justify-center text-muted-foreground"
             >
                 <p>暂无{{ currentFacetLabel }}数据</p>
             </div>
             <ScrollArea v-else class="min-h-0 flex-1">
                 <div class="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3 p-4">
+                    <!-- 在线搜索：搜索非空时置顶，点击进详情页并在线抓取 -->
+                    <div
+                        v-if="search.trim()"
+                        class="flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-primary/60 bg-primary/5 p-3 text-left transition hover:bg-primary/10"
+                        :title="`在线搜索 ${search.trim()}`"
+                        @click="enterOnlineSearch"
+                    >
+                        <Search class="size-4 shrink-0 text-primary" />
+                        <span class="min-w-0 flex-1 truncate text-sm font-medium text-primary">在线搜索「{{ search.trim() }}」</span>
+                    </div>
                     <div
                         v-for="fv in facetValues"
                         :key="fv.name"
                         class="flex cursor-pointer items-center gap-2 rounded-lg border bg-card p-3 text-left transition hover:border-primary hover:bg-accent"
-                        @click="selectedValue = fv.name"
+                        @click="selectValue(fv.name)"
                     >
                         <img
                             v-if="facetType === 'actor' && actorAvatarSrc(fv.name)"
@@ -503,6 +539,7 @@ const handleWorkMetaSaved = () => {
                 :actor-name="selectedValue!"
                 :local-videos="detailVideos"
                 :aliases="selectedAliasRows"
+                :auto-fetch="onlineFetchPending"
                 @open-video="openVideoById"
                 @open-missing="openMissing"
                 @refreshed="fetchActors"
@@ -515,6 +552,7 @@ const handleWorkMetaSaved = () => {
                 :facet-type="facetType"
                 :facet-name="selectedValue!"
                 :local-videos="detailVideos"
+                :auto-fetch="onlineFetchPending"
                 @open-video="openVideoById"
                 @open-missing="openMissing"
             />
