@@ -136,6 +136,7 @@ watch(
     () => props.actorId,
     () => {
         activeTab.value = 'all'
+        filterText.value = ''
         loadDetail()
         favoritesStore.load('actor')
     },
@@ -239,6 +240,16 @@ const displayCards = computed<Card[]>(() => {
         videoId: v.id,
         hasStoredCover: !!coverOf(v),
     }))
+})
+
+// 番号/名字过滤：边输入边过滤，作用于当前 Tab 的卡片（番号或标题部分匹配，忽略大小写）
+const filterText = ref('')
+const filteredCards = computed<Card[]>(() => {
+    const kw = filterText.value.trim().toLowerCase()
+    if (!kw) return displayCards.value
+    return displayCards.value.filter(
+        (c) => c.code.toLowerCase().includes(kw) || c.title.toLowerCase().includes(kw),
+    )
 })
 
 const onCardClick = (c: Card) => {
@@ -412,12 +423,17 @@ const onCoverError = (e: Event, code: string) => {
                 </Button>
             </template>
             <div class="ml-auto flex items-center gap-2">
+                <Input
+                    v-model="filterText"
+                    placeholder="过滤番号/名字"
+                    class="h-7 w-40 text-xs"
+                />
                 <span class="text-xs text-muted-foreground">卡片</span>
                 <input
                     v-model.number="cardSize"
                     type="range"
                     min="110"
-                    max="300"
+                    max="500"
                     step="10"
                     class="w-28 cursor-pointer accent-primary"
                     title="封面大小"
@@ -441,12 +457,18 @@ const onCoverError = (e: Event, code: string) => {
                 暂无作品，点击「抓取档案 / 全集」获取
             </div>
             <div
+                v-else-if="filteredCards.length === 0"
+                class="flex items-center justify-center py-12 text-sm text-muted-foreground"
+            >
+                无匹配结果
+            </div>
+            <div
                 v-else
                 class="grid gap-3 p-4"
                 :style="{ gridTemplateColumns: `repeat(auto-fill, minmax(${cardSize}px, 1fr))` }"
             >
                 <div
-                    v-for="c in displayCards"
+                    v-for="c in filteredCards"
                     :key="c.key"
                     class="group"
                     :class="c.videoId || c.code ? 'cursor-pointer' : ''"

@@ -170,6 +170,22 @@ const detailVideos = computed<Video[]>(() => {
     )
 })
 
+// 分类详情用本地网格（VirtualGrid），单独做番号/标题过滤：边输入边过滤
+const genreFilter = ref('')
+const filteredGenreVideos = computed<Video[]>(() => {
+    const kw = genreFilter.value.trim().toLowerCase()
+    if (!kw) return detailVideos.value
+    return detailVideos.value.filter(
+        (v) =>
+            (v.localId || '').toLowerCase().includes(kw) ||
+            (v.title || '').toLowerCase().includes(kw),
+    )
+})
+// 切换维度取值/返回时清空过滤词
+watch(selectedValue, () => {
+    genreFilter.value = ''
+})
+
 // 视频详情 / 刮削
 const detailDialogOpen = ref(false)
 const selectedVideo = ref<Video | null>(null)
@@ -323,6 +339,9 @@ const handleWorkMetaSaved = () => {
                 </Button>
                 <span class="text-sm font-medium">{{ currentFacetLabel }}：{{ selectedValue }}</span>
                 <span v-if="facetType !== 'actor'" class="text-xs text-muted-foreground">{{ detailVideos.length }} 部</span>
+                <div v-if="facetType === 'genre'" class="ml-auto">
+                    <Input v-model="genreFilter" placeholder="过滤番号/名字" class="h-7 w-40 text-xs" />
+                </div>
             </div>
 
             <!-- 演员：档案 + 全集；片商/系列/导演：全集；分类：本地网格 -->
@@ -350,7 +369,7 @@ const handleWorkMetaSaved = () => {
                 @open-missing="openMissing"
             />
             <div v-else class="flex-1 overflow-hidden py-4">
-                <VirtualGrid :items="detailVideos" @select="handleVideoSelect" @scrape="handleScrape" />
+                <VirtualGrid :items="filteredGenreVideos" @select="handleVideoSelect" @scrape="handleScrape" />
             </div>
         </template>
 
