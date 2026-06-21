@@ -14,6 +14,36 @@ use crate::utils::designation_recognizer;
 /// 分页抓取上限，防止异常分页导致空转
 const MAX_STAR_PAGES: u32 = 50;
 
+/// 演员/维度全集抓取的取消状态：按 key（`actor:{id}` / `facet:{type}:{name}`）保存当前抓取令牌，
+/// 供「停止」命令触发取消。新一次抓取会取消并替换同 key 的旧令牌。
+#[derive(Default)]
+pub struct FetchCancelState {
+    map: tokio::sync::Mutex<std::collections::HashMap<String, CancellationToken>>,
+}
+
+impl FetchCancelState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 开始一次抓取：取消并替换同 key 的旧令牌，返回新令牌
+    pub async fn begin(&self, key: String) -> CancellationToken {
+        let token = CancellationToken::new();
+        let mut guard = self.map.lock().await;
+        if let Some(old) = guard.insert(key, token.clone()) {
+            old.cancel();
+        }
+        token
+    }
+
+    /// 触发某 key 的取消（停止抓取）
+    pub async fn cancel(&self, key: &str) {
+        if let Some(token) = self.map.lock().await.get(key) {
+            token.cancel();
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActorFetchResult {
@@ -88,6 +118,7 @@ pub async fn fetch_actor_profile(
     app: AppHandle,
     actor_id: i64,
     db: State<'_, Database>,
+    cancel: State<'_, FetchCancelState>,
 ) -> AppResult<ActorFetchResult> {
     // javbus 站点 + 抓取选项（含 WebView 回退），与详情刮削一致，用于过年龄门 / CF
     let app_settings = settings::get_settings(app.clone()).await.unwrap_or_default();
@@ -105,7 +136,8 @@ pub async fn fetch_actor_profile(
         avg_score: None,
         scrape_count: None,
     };
-    let token = CancellationToken::new();
+    // 注册可取消令牌（供「停止」按钮触发），覆盖搜索 + 全集分页全过程
+    let token = cancel.begin(format!("actor:{actor_id}")).await;
     let fetcher = Fetcher::new();
 
     // 1. star code：库里有就用；没有则按演员名 searchstar 搜索并回填
@@ -194,11 +226,20 @@ pub async fn fetch_actor_profile(
     if let Some(code) = &star_code {
         let mut page = 1u32;
         loop {
+            // 用户点了「停止」：保留已抓到的页（每页已各自提交），直接结束
+            if token.is_cancelled() {
+                break;
+            }
             let url = actor_provider::build_star_url(code, page);
-            let html = fetcher
-                .fetch(&app, &url, &site, options, &token)
-                .await
-                .map_err(AppError::Business)?;
+            let html = match fetcher.fetch(&app, &url, &site, options, &token).await {
+                Ok(h) => h,
+                Err(e) => {
+                    if token.is_cancelled() {
+                        break;
+                    }
+                    return Err(AppError::Business(e));
+                }
+            };
             let page_profile = if page == 1 {
                 Some(actor_provider::parse_profile(&html))
             } else {
@@ -283,6 +324,9 @@ pub async fn fetch_actor_profile(
 #[tauri::command]
 pub async fn get_actor_detail(
     actor_id: i64,
+    // 该演员的所有别名：多名字演员的不同 name-form 可能各自有一行 actors 记录，全集可能落在任一
+    // name-form 的 actor_id 下。按全部别名 id 合并作品，避免「之前抓过却查到 0 部」。
+    alias_names: Option<Vec<String>>,
     db: State<'_, Database>,
 ) -> AppResult<serde_json::Value> {
     let conn = db.get_connection()?;
@@ -308,28 +352,79 @@ pub async fn get_actor_detail(
             },
         )?;
 
-        let mut stmt = conn.prepare(
+        // 汇总当前 id + 所有别名对应的 actor_id（去重）
+        let mut ids: Vec<i64> = vec![actor_id];
+        if let Some(names) = &alias_names {
+            let mut id_stmt = conn.prepare("SELECT id FROM actors WHERE name = ?")?;
+            for name in names {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Ok(id) =
+                    id_stmt.query_row(rusqlite::params![trimmed], |r| r.get::<_, i64>(0))
+                {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
             "SELECT code, title, cover_url, release_date, status, local_video_id, is_uncensored
-             FROM actor_works WHERE actor_id = ? ORDER BY release_date DESC",
-        )?;
-        let works: Vec<serde_json::Value> = stmt
-            .query_map(rusqlite::params![actor_id], |r| {
-                Ok(serde_json::json!({
-                    "code": r.get::<_, String>(0)?,
+             FROM actor_works WHERE actor_id IN ({placeholders}) ORDER BY release_date DESC"
+        );
+        let id_params: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let raw: Vec<(String, bool, serde_json::Value)> = stmt
+            .query_map(id_params.as_slice(), |r| {
+                let code = r.get::<_, String>(0)?;
+                let status = r.get::<_, String>(4)?;
+                let is_local = status == "local";
+                let value = serde_json::json!({
+                    "code": code.clone(),
                     "title": r.get::<_, Option<String>>(1)?,
                     "coverUrl": r.get::<_, Option<String>>(2)?,
                     "releaseDate": r.get::<_, Option<String>>(3)?,
-                    "status": r.get::<_, String>(4)?,
+                    "status": status,
                     "localVideoId": r.get::<_, Option<String>>(5)?,
                     "isUncensored": r.get::<_, Option<i64>>(6)?.unwrap_or(0) != 0,
-                }))
+                });
+                Ok((code, is_local, value))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // 跨 id 去重：同番号只保留一条，本地状态优先（缺失版可被本地版替换）
+        let mut works: Vec<serde_json::Value> = Vec::new();
+        let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (code, is_local, value) in raw {
+            if let Some(&i) = index.get(&code) {
+                if is_local && works[i].get("status").and_then(|s| s.as_str()) != Some("local") {
+                    works[i] = value;
+                }
+            } else {
+                index.insert(code, works.len());
+                works.push(value);
+            }
+        }
 
         Ok(serde_json::json!({ "profile": profile, "works": works }))
     })
     .await
     .map_err(|e| AppError::TaskJoin(e.to_string()))?
+}
+
+/// 停止某演员的全集抓取（触发已注册的取消令牌）。
+#[tauri::command]
+pub async fn cancel_actor_fetch(
+    actor_id: i64,
+    cancel: State<'_, FetchCancelState>,
+) -> AppResult<()> {
+    cancel.cancel(&format!("actor:{actor_id}")).await;
+    Ok(())
 }
 
 // ==================== 维度（片商/系列/导演）作品全集 ====================
@@ -358,6 +453,7 @@ pub async fn fetch_facet_works(
     facet_type: String,
     facet_name: String,
     db: State<'_, Database>,
+    cancel: State<'_, FetchCancelState>,
 ) -> AppResult<FacetFetchResult> {
     let mt = facet_metadata_table(&facet_type)
         .ok_or_else(|| AppError::Business("不支持的维度".to_string()))?;
@@ -377,7 +473,10 @@ pub async fn fetch_facet_works(
         avg_score: None,
         scrape_count: None,
     };
-    let token = CancellationToken::new();
+    // 注册可取消令牌（供「停止」按钮触发），覆盖数据源定位 + 全集分页全过程
+    let token = cancel
+        .begin(format!("facet:{}:{}", facet_type, facet_name.trim()))
+        .await;
     let fetcher = Fetcher::new();
 
     // 1. 维度 id
@@ -415,11 +514,20 @@ pub async fn fetch_facet_works(
     let mut works_total = 0usize;
     let mut page = 1u32;
     loop {
+        // 用户点了「停止」：保留已抓到的页，直接结束
+        if token.is_cancelled() {
+            break;
+        }
         let url = actor_provider::build_facet_url(&facet_type, &source_id, page);
-        let html = fetcher
-            .fetch(&app, &url, &site, options, &token)
-            .await
-            .map_err(AppError::Business)?;
+        let html = match fetcher.fetch(&app, &url, &site, options, &token).await {
+            Ok(h) => h,
+            Err(e) => {
+                if token.is_cancelled() {
+                    break;
+                }
+                return Err(AppError::Business(e));
+            }
+        };
         let page_works = actor_provider::parse_works(&html);
         let has_next = actor_provider::parse_has_next_page(&html);
         if page_works.is_empty() {
@@ -479,6 +587,19 @@ pub async fn fetch_facet_works(
         )?
     };
     Ok(FacetFetchResult { works_total, works_local })
+}
+
+/// 停止某维度（片商/系列/导演）的全集抓取（触发已注册的取消令牌）。
+#[tauri::command]
+pub async fn cancel_facet_fetch(
+    facet_type: String,
+    facet_name: String,
+    cancel: State<'_, FetchCancelState>,
+) -> AppResult<()> {
+    cancel
+        .cancel(&format!("facet:{}:{}", facet_type, facet_name.trim()))
+        .await;
+    Ok(())
 }
 
 /// 维度详情：作品全集（本地有/缺失）。供片商/系列/导演详情面板渲染。

@@ -5,7 +5,7 @@ import { listen } from '@tauri-apps/api/event'
 import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Loader2, Download, Star, Pencil, X, Check } from 'lucide-vue-next'
+import { Loader2, Download, Star, Pencil, Check, X } from 'lucide-vue-next'
 import { Input } from '@/components/ui/input'
 import type { Video } from '@/types'
 import { dmmCoverUrl, dmmMonoCoverUrl, isDmmPlaceholderSize, isDmmImageUrl } from '@/utils/dmm'
@@ -45,43 +45,75 @@ const emit = defineEmits<{
     (e: 'aliases-changed'): void
 }>()
 
-// 多名字：展示（只读，不跳转）+ 编辑（加=归并、删=拉黑，均经 entity_alias 重建）
+// 多名字：展示（第一名为主名加粗，其余浅色小字）+ 编辑（一个输入框、逗号分隔所有名字）
 const aliasEditing = ref(false)
-const newAlias = ref('')
+const editText = ref('') // 编辑态：所有名字逗号分隔（第一个为主名 = 当前名）
 const aliasBusy = ref(false)
 const allAliases = computed<AliasRow[]>(() => props.aliases ?? [])
-// 除当前查看名外的其它名字（展示态只列其它名，当前名已在标题）
+// 除当前查看名外的其它名字（展示态浅色小字列出）
 const otherAliases = computed(() => allAliases.value.filter((a) => a.name !== props.actorName))
-const addAlias = async () => {
-    const name = newAlias.value.trim()
-    if (!name || aliasBusy.value) return
+
+// 把编辑框文本拆成去重后的名字数组（支持中英文逗号、顿号、换行分隔）
+function parseNames(text: string): string[] {
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const raw of text.split(/[,，、\n]/)) {
+        const n = raw.trim()
+        if (n && !seen.has(n)) {
+            seen.add(n)
+            out.push(n)
+        }
+    }
+    return out
+}
+
+// 进入编辑：预填所有名字（当前名在前），逗号分隔
+function startEdit() {
+    editText.value = [props.actorName, ...otherAliases.value.map((a) => a.name)].join('，')
+    aliasEditing.value = true
+}
+
+// 保存：解析名字 → 新增的归并、删除的拉黑；当前名恒为锚点不删
+async function saveAliases() {
+    if (aliasBusy.value) return
+    const names = parseNames(editText.value)
+    // 当前名始终保留为主名（第一个）
+    if (!names.includes(props.actorName)) names.unshift(props.actorName)
+
+    const currentNames = new Set([props.actorName, ...allAliases.value.map((a) => a.name)])
+    const nextNames = new Set(names)
+    const added = names.filter((n) => !currentNames.has(n))
+    const removed = [...currentNames].filter((n) => n !== props.actorName && !nextNames.has(n))
+
+    if (added.length === 0 && removed.length === 0) {
+        aliasEditing.value = false
+        return
+    }
+
     aliasBusy.value = true
     try {
-        await invoke('entity_alias_force_merge', {
-            entityType: 'actor',
-            names: [props.actorName, name],
-        })
-        newAlias.value = ''
+        // 新增任一名字：把全集一起归并到同一实体（已存在的幂等）
+        if (added.length > 0) {
+            await invoke('entity_alias_force_merge', { entityType: 'actor', names })
+        }
+        // 删除的名字逐个拉黑（永不复活）
+        for (const n of removed) {
+            await invoke('entity_alias_block', { entityType: 'actor', name: n })
+        }
         emit('aliases-changed')
-        toast.success('已添加名字')
+        toast.success('已保存名字')
+        aliasEditing.value = false
     } catch (e) {
-        toast.error('添加失败: ' + String(e))
+        toast.error('保存失败: ' + String(e))
     } finally {
         aliasBusy.value = false
     }
 }
-const removeAlias = async (name: string) => {
-    if (aliasBusy.value || name === props.actorName) return
-    aliasBusy.value = true
-    try {
-        await invoke('entity_alias_block', { entityType: 'actor', name })
-        emit('aliases-changed')
-        toast.success('已移除名字')
-    } catch (e) {
-        toast.error('移除失败: ' + String(e))
-    } finally {
-        aliasBusy.value = false
-    }
+
+// 编辑/保存切换：编辑态点击=保存，展示态点击=进入编辑
+function toggleEdit() {
+    if (aliasEditing.value) void saveAliases()
+    else startEdit()
 }
 
 interface ActorProfile {
@@ -122,6 +154,8 @@ const loadDetail = async (silent = false) => {
     try {
         const res = await invoke<{ profile: ActorProfile; works: ActorWork[] }>('get_actor_detail', {
             actorId: props.actorId,
+            // 传全部别名：跨多名字演员的不同 actor_id 合并作品，避免之前抓过却查到 0 部
+            aliasNames: (props.aliases ?? []).map((a) => a.name),
         })
         profile.value = res.profile
         works.value = res.works ?? []
@@ -137,10 +171,20 @@ watch(
     () => {
         activeTab.value = 'all'
         filterText.value = ''
+        aliasEditing.value = false
         loadDetail()
         favoritesStore.load('actor')
     },
     { immediate: true },
+)
+
+// 别名集合（异步到位或编辑后变化）后静默重载：按全部别名跨 id 合并作品，
+// 避免别名晚于 actorId 到达时漏掉之前抓过的全集
+watch(
+    () => (props.aliases ?? []).map((a) => a.name).join('|'),
+    () => {
+        if (props.actorId) loadDetail(true)
+    },
 )
 
 // 供父组件在缺失作品刮削落库后静默刷新网格（封面/标题即时更新）
@@ -171,6 +215,16 @@ const fetchProfile = async () => {
     } finally {
         if (unlisten) unlisten()
         fetching.value = false
+    }
+}
+
+// 停止抓取：通知后端取消，已抓到的页（每页已落库）会保留
+const cancelFetch = async () => {
+    if (!props.actorId) return
+    try {
+        await invoke('cancel_actor_fetch', { actorId: props.actorId })
+    } catch (e) {
+        console.error('停止抓取失败:', e)
     }
 }
 
@@ -326,63 +380,22 @@ const onCoverError = (e: Event, code: string) => {
                 />
             </div>
             <div class="min-w-0 flex-1">
-                <div class="flex items-center gap-2">
+                <!-- 名字行：编辑态=一个输入框（逗号分隔所有名字）；展示态=第一名加粗 + 其余浅色小字 -->
+                <Input
+                    v-if="aliasEditing"
+                    v-model="editText"
+                    class="h-8 max-w-md text-sm"
+                    placeholder="用逗号分隔多个名字，第一个为主名"
+                    :disabled="aliasBusy"
+                    @keyup.enter="saveAliases"
+                />
+                <div v-else class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                     <span class="text-lg font-semibold">{{ actorName }}</span>
-                    <button
-                        type="button"
-                        class="shrink-0 text-muted-foreground transition hover:text-yellow-500"
-                        :class="isFav ? 'text-yellow-500' : ''"
-                        title="收藏演员"
-                        @click="toggleFav"
-                    >
-                        <Star class="size-5" :fill="isFav ? 'currentColor' : 'none'" />
-                    </button>
-                    <button
-                        type="button"
-                        class="shrink-0 text-muted-foreground transition hover:text-primary"
-                        :class="aliasEditing ? 'text-primary' : ''"
-                        title="编辑名字"
-                        @click="aliasEditing = !aliasEditing"
-                    >
-                        <component :is="aliasEditing ? Check : Pencil" class="size-4" />
-                    </button>
-                </div>
-
-                <!-- 多名字：展示态（只读，不跳转） -->
-                <div v-if="!aliasEditing && otherAliases.length" class="mt-1 flex flex-wrap items-center gap-1">
                     <span
                         v-for="a in otherAliases"
                         :key="a.name"
-                        class="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+                        class="text-sm text-muted-foreground/70"
                     >{{ a.name }}</span>
-                </div>
-                <!-- 多名字：编辑态（加=归并、删=拉黑；属于任一名字的视频都归到本演员） -->
-                <div v-if="aliasEditing" class="mt-1 flex flex-wrap items-center gap-1">
-                    <span
-                        v-for="a in allAliases"
-                        :key="a.name"
-                        class="flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-xs"
-                        :class="a.name === actorName ? 'text-foreground' : 'text-muted-foreground'"
-                    >
-                        {{ a.name }}
-                        <button
-                            v-if="a.name !== actorName"
-                            type="button"
-                            class="text-muted-foreground hover:text-destructive"
-                            :disabled="aliasBusy"
-                            title="移除"
-                            @click="removeAlias(a.name)"
-                        >
-                            <X class="size-3" />
-                        </button>
-                    </span>
-                    <Input
-                        v-model="newAlias"
-                        class="h-6 w-28 text-xs"
-                        placeholder="添加名字"
-                        :disabled="aliasBusy"
-                        @keyup.enter="addAlias"
-                    />
                 </div>
 
                 <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
@@ -397,11 +410,37 @@ const onCoverError = (e: Event, code: string) => {
                     </template>
                     <template v-else> 本地 {{ localVideos.length }} 部（未抓取全集） </template>
                 </div>
-                <Button size="sm" class="mt-2 gap-1" :disabled="fetching || !actorId" @click="fetchProfile">
-                    <Loader2 v-if="fetching" class="size-4 animate-spin" />
-                    <Download v-else class="size-4" />
-                    {{ fetching ? '抓取中…' : hasFetched ? '重新抓取' : '抓取档案 / 全集' }}
-                </Button>
+                <!-- 抓取 + 收藏 + 编辑/保存：图标后置 -->
+                <div class="mt-2 flex items-center gap-2">
+                    <Button size="sm" class="gap-1" :disabled="fetching || !actorId" @click="fetchProfile">
+                        <Loader2 v-if="fetching" class="size-4 animate-spin" />
+                        <Download v-else class="size-4" />
+                        {{ fetching ? '抓取中…' : hasFetched ? '重新抓取' : '抓取档案 / 全集' }}
+                    </Button>
+                    <Button v-if="fetching" size="sm" variant="outline" class="gap-1" @click="cancelFetch">
+                        <X class="size-4" />
+                        停止
+                    </Button>
+                    <button
+                        type="button"
+                        class="shrink-0 text-muted-foreground transition hover:text-yellow-500"
+                        :class="isFav ? 'text-yellow-500' : ''"
+                        title="收藏演员"
+                        @click="toggleFav"
+                    >
+                        <Star class="size-5" :fill="isFav ? 'currentColor' : 'none'" />
+                    </button>
+                    <button
+                        type="button"
+                        class="shrink-0 text-muted-foreground transition hover:text-primary disabled:opacity-50"
+                        :class="aliasEditing ? 'text-primary' : ''"
+                        :title="aliasEditing ? '保存名字' : '编辑名字'"
+                        :disabled="aliasBusy"
+                        @click="toggleEdit"
+                    >
+                        <component :is="aliasEditing ? Check : Pencil" class="size-4" />
+                    </button>
+                </div>
             </div>
         </div>
 

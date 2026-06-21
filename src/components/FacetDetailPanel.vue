@@ -6,7 +6,7 @@ import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
-import { Loader2, Download, Star } from 'lucide-vue-next'
+import { Loader2, Download, Star, X } from 'lucide-vue-next'
 import type { Video } from '@/types'
 import { dmmCoverUrl, dmmMonoCoverUrl, isDmmPlaceholderSize, isDmmImageUrl } from '@/utils/dmm'
 import { useSettingsStore, useFavoritesStore } from '@/stores'
@@ -98,6 +98,18 @@ const fetchWorks = async () => {
     } finally {
         if (unlisten) unlisten()
         fetching.value = false
+    }
+}
+
+// 停止抓取：通知后端取消，已抓到的页（每页已落库）会保留
+const cancelWorks = async () => {
+    try {
+        await invoke('cancel_facet_fetch', {
+            facetType: props.facetType,
+            facetName: props.facetName,
+        })
+    } catch (e) {
+        console.error('停止抓取失败:', e)
     }
 }
 
@@ -236,6 +248,10 @@ const onCoverError = (e: Event, code: string) => {
                 <Loader2 v-if="fetching" class="size-4 animate-spin" />
                 <Download v-else class="size-4" />
                 {{ fetching ? '抓取中…' : hasWorks ? '重新抓取' : '抓取全集' }}
+            </Button>
+            <Button v-if="fetching" size="sm" variant="outline" class="gap-1" @click="cancelWorks">
+                <X class="size-4" />
+                停止
             </Button>
         </div>
 

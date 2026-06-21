@@ -285,6 +285,8 @@ pub fn run() {
             app.manage(resource_scrape::commands::RsTaskQueueState::new());
             app.manage(resource_scrape::fetcher::WebviewPoolState::default());
             app.manage(resource_scrape::commands::SearchCancelState::new());
+            // 演员/维度全集抓取的取消状态
+            app.manage(actor::commands::FetchCancelState::new());
 
             // 初始化 MetaTube sidecar（聚合刮削源，随应用启动；失败自动重试，放弃则回退跳过）
             {
@@ -321,8 +323,10 @@ pub fn run() {
             video::commands::get_actors,
             actor::commands::fetch_actor_profile,
             actor::commands::get_actor_detail,
+            actor::commands::cancel_actor_fetch,
             actor::commands::fetch_facet_works,
             actor::commands::get_facet_detail,
+            actor::commands::cancel_facet_fetch,
             actor::commands::save_scraped_work_meta,
             actor::commands::toggle_favorite,
             actor::commands::list_favorites,
