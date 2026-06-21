@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
     Building2,
@@ -12,11 +12,15 @@ import {
     ArrowDownAZ,
     ArrowDown01,
     Star,
+    Download,
+    Loader2,
 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { toast } from 'vue-sonner'
 import VirtualGrid from '@/components/VirtualGrid.vue'
 import VideoDetailDialog from '@/components/VideoDetailDialog.vue'
 import ScrapeDialog from '@/components/ScrapeDialog.vue'
@@ -188,6 +192,85 @@ const facetValues = computed(() => {
     return arr
 })
 
+// 批量抓档案：对当前列表里的演员后台并发抓取档案/全集，进度经 actor-batch-progress 增量上报
+const batchRunning = ref(false)
+const batchProgress = ref<{
+    done: number
+    total: number
+    succeeded: number
+    failed: number
+    name?: string
+}>({ done: 0, total: 0, succeeded: 0, failed: 0 })
+let batchUnlisten: (() => void) | null = null
+
+// 当前列表（含搜索/收藏过滤）里的演员 → actors 表 id（主名取不到回退簇内别名）
+const collectActorIdsForBatch = (): number[] => {
+    const ids = new Set<number>()
+    for (const fv of facetValues.value) {
+        let id = actorMap.value.get(fv.name)?.id
+        if (id == null) {
+            const names = canonicalToNames.value.get(fv.name)
+            if (names) {
+                for (const n of names) {
+                    const i = actorMap.value.get(n)?.id
+                    if (i != null) {
+                        id = i
+                        break
+                    }
+                }
+            }
+        }
+        if (id != null) ids.add(id)
+    }
+    return [...ids]
+}
+
+const startBatchFetch = async () => {
+    if (batchRunning.value) return
+    const ids = collectActorIdsForBatch()
+    if (ids.length === 0) {
+        toast.info('没有可抓取的演员')
+        return
+    }
+    batchRunning.value = true
+    batchProgress.value = { done: 0, total: ids.length, succeeded: 0, failed: 0 }
+    batchUnlisten = await listen<typeof batchProgress.value>('actor-batch-progress', (e) => {
+        if (e.payload) batchProgress.value = e.payload
+    })
+    try {
+        const sum = await invoke<{ total: number; succeeded: number; failed: number }>(
+            'fetch_actors_profile_batch',
+            { actorIds: ids, onlyMissing: true },
+        )
+        toast.success(`批量抓取完成：成功 ${sum.succeeded}，失败 ${sum.failed}（共 ${sum.total}）`)
+        await fetchActors()
+        await fetchActorClusters()
+    } catch (e) {
+        console.error('批量抓取失败:', e)
+        toast.error('批量抓取失败: ' + String(e))
+    } finally {
+        batchRunning.value = false
+        if (batchUnlisten) {
+            batchUnlisten()
+            batchUnlisten = null
+        }
+    }
+}
+const stopBatchFetch = async () => {
+    try {
+        await invoke('cancel_actors_batch')
+    } catch (e) {
+        console.error('停止批量抓取失败:', e)
+    }
+}
+// 卸载时解绑批量进度监听，避免遗留监听器
+onUnmounted(() => {
+    if (batchUnlisten) {
+        batchUnlisten()
+        batchUnlisten = null
+    }
+})
+
 // 选中演员的跨语言别名（中文/英文/日文/曾用名），用于把属于任一别名的视频都归到该演员
 interface AliasRow {
     name: string
@@ -328,6 +411,19 @@ const handleWorkMetaSaved = () => {
             </div>
 
             <div v-if="!selectedValue" class="ml-auto flex items-center gap-2">
+                <Button
+                    v-if="facetType === 'actor'"
+                    variant="outline"
+                    size="sm"
+                    class="h-8 gap-1"
+                    :disabled="batchRunning"
+                    title="对当前列表的演员后台批量抓取缺失档案/全集"
+                    @click="startBatchFetch"
+                >
+                    <Loader2 v-if="batchRunning" class="size-4 animate-spin" />
+                    <Download v-else class="size-4" />
+                    {{ batchRunning ? '抓取中…' : '批量抓档案' }}
+                </Button>
                 <div class="relative">
                     <Search class="absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                     <Input v-model="search" :placeholder="`搜索${currentFacetLabel}`" class="h-8 w-48 pl-8" />
@@ -348,6 +444,24 @@ const handleWorkMetaSaved = () => {
                     收藏
                 </Button>
             </div>
+        </div>
+
+        <!-- 批量抓档案进度 -->
+        <div
+            v-if="batchRunning"
+            class="flex items-center gap-3 border-b bg-muted/40 px-4 py-1.5 text-xs"
+        >
+            <Loader2 class="size-3.5 animate-spin text-primary" />
+            <span class="tabular-nums">
+                批量抓取 {{ batchProgress.done }}/{{ batchProgress.total }} · 成功
+                {{ batchProgress.succeeded }} · 失败 {{ batchProgress.failed }}
+            </span>
+            <span v-if="batchProgress.name" class="truncate text-muted-foreground"
+                >当前：{{ batchProgress.name }}</span
+            >
+            <Button variant="ghost" size="sm" class="ml-auto h-6 px-2 text-xs" @click="stopBatchFetch"
+                >停止</Button
+            >
         </div>
 
         <!-- 分面值列表 -->

@@ -1,6 +1,9 @@
 //! 演员中心命令：抓取档案 + 作品全集（star 页），演员详情查询。
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::{ActorWorkInput, Database, FacetWorkInput, MetadataTable};
@@ -108,21 +111,8 @@ fn actor_info_to_profile(info: &crate::metatube::types::ActorInfo) -> crate::db:
     }
 }
 
-/// 抓取演员档案 + 作品全集：解析 star 页（分页爬全）→ 落库 + 本地番号匹配。
-///
-/// star code 优先用库里已收割的（刮削时从详情页 `.avatar-box` 取）；没有则按演员名走
-/// `searchstar` 搜索解析得到并回填。所有抓取经 `Fetcher`（HTTP→WebView 回退），
-/// 过 javbus 的年龄门 / Cloudflare（与详情刮削同路径）。
-#[tauri::command]
-pub async fn fetch_actor_profile(
-    app: AppHandle,
-    actor_id: i64,
-    // 抓取用名字候选（主名在前），逐个搜源，命中即止。空则只用库内名。
-    name_candidates: Option<Vec<String>>,
-    db: State<'_, Database>,
-    cancel: State<'_, FetchCancelState>,
-) -> AppResult<ActorFetchResult> {
-    // javbus 站点 + 抓取选项（含 WebView 回退），与详情刮削一致，用于过年龄门 / CF
+/// javbus 站点 + 抓取选项（含 WebView 回退），与详情刮削一致，用于过年龄门 / CF。
+async fn javbus_fetch_context(app: &AppHandle) -> (FetchOptions, ResourceSite) {
     let app_settings = settings::get_settings(app.clone()).await.unwrap_or_default();
     let fetch_settings = settings::resolve_scrape_fetch_settings(&app_settings.scrape);
     let options = FetchOptions {
@@ -138,8 +128,49 @@ pub async fn fetch_actor_profile(
         avg_score: None,
         scrape_count: None,
     };
+    (options, site)
+}
+
+/// 抓取演员档案 + 作品全集：解析 star 页（分页爬全）→ 落库 + 本地番号匹配。
+///
+/// star code 优先用库里已收割的（刮削时从详情页 `.avatar-box` 取）；没有则按演员名走
+/// `searchstar` 搜索解析得到并回填。所有抓取经 `Fetcher`（HTTP→WebView 回退），
+/// 过 javbus 的年龄门 / Cloudflare（与详情刮削同路径）。
+#[tauri::command]
+pub async fn fetch_actor_profile(
+    app: AppHandle,
+    actor_id: i64,
+    // 抓取用名字候选（主名在前），逐个搜源，命中即止。空则只用库内名。
+    name_candidates: Option<Vec<String>>,
+    db: State<'_, Database>,
+    cancel: State<'_, FetchCancelState>,
+) -> AppResult<ActorFetchResult> {
+    let (options, site) = javbus_fetch_context(&app).await;
     // 注册可取消令牌（供「停止」按钮触发），覆盖搜索 + 全集分页全过程
     let token = cancel.begin(format!("actor:{actor_id}")).await;
+    run_actor_fetch(
+        app,
+        db.inner().clone(),
+        actor_id,
+        name_candidates.unwrap_or_default(),
+        options,
+        site,
+        token,
+    )
+    .await
+}
+
+/// 抓取单个演员档案 + 全集的核心逻辑（单个命令与批量共用）。
+/// `extra_candidates`：优先尝试的名字（主名/别名在前），库内名兜底；逐个搜源命中即止。
+async fn run_actor_fetch(
+    app: AppHandle,
+    db: Database,
+    actor_id: i64,
+    extra_candidates: Vec<String>,
+    options: FetchOptions,
+    site: ResourceSite,
+    token: CancellationToken,
+) -> AppResult<ActorFetchResult> {
     let fetcher = Fetcher::new();
 
     // 1. star code：库里有就用；没有则按演员名 searchstar 搜索并回填
@@ -156,15 +187,13 @@ pub async fn fetch_actor_profile(
         (name, code)
     };
 
-    // 名字候选：前端传入（主名在前）优先，库内名兜底；去重保序。让用户把正确源名放前面即可搜到。
+    // 名字候选：传入（主名/别名在前）优先，库内名兜底；去重保序。让正确源名排前面即可搜到。
     let candidates: Vec<String> = {
         let mut v: Vec<String> = Vec::new();
-        if let Some(list) = name_candidates {
-            for c in list {
-                let t = c.trim().to_string();
-                if !t.is_empty() && !v.contains(&t) {
-                    v.push(t);
-                }
+        for c in extra_candidates {
+            let t = c.trim().to_string();
+            if !t.is_empty() && !v.contains(&t) {
+                v.push(t);
             }
         }
         let nt = name.trim().to_string();
@@ -238,7 +267,7 @@ pub async fn fetch_actor_profile(
     // 2. 先落 MetaTube 档案并发进度，让前端立即显示档案（即使没全集也有档案）
     let mut profile_updated = mt_profile.is_some();
     if let Some(p) = mt_profile.clone() {
-        let db_inner = db.inner().clone();
+        let db_inner = db.clone();
         tokio::task::spawn_blocking(move || -> AppResult<()> {
             let conn = db_inner.get_connection()?;
             Database::update_actor_profile(&conn, actor_id, &p)?;
@@ -287,7 +316,7 @@ pub async fn fetch_actor_profile(
             }
 
             // 持久化本页（page1 档案 + 作品 + 本地匹配）。page1 在 star 档案后重写 MetaTube，保 MetaTube 优先
-            let db_inner = db.inner().clone();
+            let db_inner = db.clone();
             let batch = page_works;
             let pp = page_profile;
             let mt = if page == 1 { mt_profile.clone() } else { None };
@@ -455,6 +484,168 @@ pub async fn cancel_actor_fetch(
     cancel: State<'_, FetchCancelState>,
 ) -> AppResult<()> {
     cancel.cancel(&format!("actor:{actor_id}")).await;
+    Ok(())
+}
+
+/// 批量抓取并发上限。WebView 回退在 `Fetcher` 全局池里按站点串行、HTTP 经 anti_block 限速，
+/// 故并发拉档案是安全的；适度并发即可，过高无益（反而抢占 CF 手动验证窗口）。
+const BATCH_CONCURRENCY: usize = 3;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchFetchSummary {
+    pub total: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+}
+
+/// 后台批量抓取多名演员的档案 + 全集：并发受限、可停止、逐个发 `actor-batch-progress` 进度。
+///
+/// `only_missing=true` 跳过已抓过档案的演员（`profile_updated_at` 非空），用于「补抓没抓到的」——
+/// 失败/从未抓过的该字段为空，会被重试。每名演员的搜索候选名由后端按别名簇展开（日文优先），
+/// 无需前端传入。
+#[tauri::command]
+pub async fn fetch_actors_profile_batch(
+    app: AppHandle,
+    actor_ids: Vec<i64>,
+    only_missing: bool,
+    db: State<'_, Database>,
+    cancel: State<'_, FetchCancelState>,
+) -> AppResult<BatchFetchSummary> {
+    let token = cancel.begin("actor-batch".to_string()).await;
+    let (options, site) = javbus_fetch_context(&app).await;
+
+    // 过滤：only_missing 跳过已有档案的演员
+    let ids: Vec<i64> = {
+        let conn = db.get_connection()?;
+        let mut out = Vec::with_capacity(actor_ids.len());
+        for id in actor_ids {
+            if only_missing {
+                let done: bool = conn
+                    .query_row(
+                        "SELECT profile_updated_at IS NOT NULL FROM actors WHERE id = ?",
+                        rusqlite::params![id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(false);
+                if done {
+                    continue;
+                }
+            }
+            out.push(id);
+        }
+        out
+    };
+
+    let total = ids.len();
+    let _ = app.emit(
+        "actor-batch-progress",
+        serde_json::json!({ "done": 0, "total": total, "succeeded": 0, "failed": 0, "running": total > 0 }),
+    );
+
+    let sem = Arc::new(Semaphore::new(BATCH_CONCURRENCY));
+    let done = Arc::new(AtomicUsize::new(0));
+    let ok = Arc::new(AtomicUsize::new(0));
+    let failed = Arc::new(AtomicUsize::new(0));
+
+    let mut handles = Vec::new();
+    for actor_id in ids {
+        if token.is_cancelled() {
+            break;
+        }
+        let app2 = app.clone();
+        let db2 = db.inner().clone();
+        let site2 = site.clone();
+        let token2 = token.clone();
+        let sem2 = sem.clone();
+        let done2 = done.clone();
+        let ok2 = ok.clone();
+        let failed2 = failed.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = match sem2.acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            if token2.is_cancelled() {
+                return;
+            }
+            // 演员名 + 别名簇候选（日文优先），供逐个搜源
+            let (name, extra): (String, Vec<String>) = match db2.get_connection() {
+                Ok(conn) => {
+                    let name: String = conn
+                        .query_row(
+                            "SELECT name FROM actors WHERE id = ?",
+                            rusqlite::params![actor_id],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or_default();
+                    let extra = crate::entity_alias::expand(
+                        &conn,
+                        crate::entity_alias::ENTITY_ACTOR,
+                        &name,
+                    )
+                    .map(|rows| rows.into_iter().map(|a| a.name).collect())
+                    .unwrap_or_default();
+                    (name, extra)
+                }
+                Err(_) => (String::new(), Vec::new()),
+            };
+
+            let res = run_actor_fetch(
+                app2.clone(),
+                db2,
+                actor_id,
+                extra,
+                options,
+                site2,
+                token2.clone(),
+            )
+            .await;
+            match res {
+                Ok(_) => {
+                    ok2.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    failed2.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            let d = done2.fetch_add(1, Ordering::Relaxed) + 1;
+            let _ = app2.emit(
+                "actor-batch-progress",
+                serde_json::json!({
+                    "done": d,
+                    "total": total,
+                    "succeeded": ok2.load(Ordering::Relaxed),
+                    "failed": failed2.load(Ordering::Relaxed),
+                    "name": name,
+                    "running": d < total && !token2.is_cancelled(),
+                }),
+            );
+        }));
+    }
+
+    for h in handles {
+        let _ = h.await;
+    }
+
+    let succeeded = ok.load(Ordering::Relaxed);
+    let failed_n = failed.load(Ordering::Relaxed);
+    let done_n = done.load(Ordering::Relaxed);
+    let _ = app.emit(
+        "actor-batch-progress",
+        serde_json::json!({ "done": done_n, "total": total, "succeeded": succeeded, "failed": failed_n, "running": false }),
+    );
+    Ok(BatchFetchSummary {
+        total,
+        succeeded,
+        failed: failed_n,
+    })
+}
+
+/// 停止批量抓取（触发批量取消令牌）。
+#[tauri::command]
+pub async fn cancel_actors_batch(cancel: State<'_, FetchCancelState>) -> AppResult<()> {
+    cancel.cancel("actor-batch").await;
     Ok(())
 }
 

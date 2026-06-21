@@ -322,6 +322,8 @@ pub fn run() {
             video::commands::get_videos,
             video::commands::get_actors,
             actor::commands::fetch_actor_profile,
+            actor::commands::fetch_actors_profile_batch,
+            actor::commands::cancel_actors_batch,
             actor::commands::get_actor_detail,
             actor::commands::cancel_actor_fetch,
             actor::commands::fetch_facet_works,
