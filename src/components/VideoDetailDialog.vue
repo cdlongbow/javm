@@ -104,6 +104,11 @@ const pendingRemotePreviewThumbs = ref<string[]>([])
 const pendingPosterSource = ref<string | undefined>(undefined)
 const pendingRemoteCoverUrl = ref('')
 
+// 预览图最小有效短边（与后端 media::artwork::MIN_PREVIEW_EDGE 一致）：短边小于此的小图在展示时屏蔽。
+// 后端只在「下载落地」时按尺寸过滤，一键刮削/未落地的远程缩略图会绕过该过滤，这里按实测尺寸补屏蔽。
+const MIN_PREVIEW_EDGE = 250
+const undersizedThumbSrcs = ref<Set<string>>(new Set())
+
 const INVALID_TITLE_CHARS = new Set(['<', '>', ':', '"', '/', '\\', '|', '?', '*'])
 const RESERVED_TITLE_PATTERN = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
 
@@ -231,6 +236,7 @@ watch(() => props.open, (isOpen) => {
     if (!isOpen) {
         hasScrapedData.value = false // 关闭时重置刮削状态
         resetScrapePendingState()
+        undersizedThumbSrcs.value = new Set() // 重置小图屏蔽集合，下次打开按新视频重新实测
     } else if (props.video?.videoPath) {
         void loadResolvedPreviewSources(props.video.videoPath)
     }
@@ -255,6 +261,27 @@ const thumbSources = computed<VideoPreviewSource[]>(() => {
     return []
 })
 
+// 屏蔽过小的预览图：剔除已实测短边 < MIN_PREVIEW_EDGE 的小图（缩略图/网格小图）。
+// 在源头过滤，previewImages / allImages / 删除映射都跟随，保持索引一致。
+const visibleThumbSources = computed<VideoPreviewSource[]>(() =>
+    thumbSources.value.filter((item) => {
+        const finalSrc = toImageSrc(item.src) ?? item.src
+        return !undersizedThumbSrcs.value.has(finalSrc)
+    }),
+)
+
+// 预览图加载完成时实测尺寸，过小则加入屏蔽集合（响应式剔除，不再展示也不进查看器）
+function onThumbLoad(e: Event, finalSrc: string) {
+    const img = e.target as HTMLImageElement
+    const w = img.naturalWidth
+    const h = img.naturalHeight
+    if (w && h && Math.min(w, h) < MIN_PREVIEW_EDGE && !undersizedThumbSrcs.value.has(finalSrc)) {
+        const next = new Set(undersizedThumbSrcs.value)
+        next.add(finalSrc)
+        undersizedThumbSrcs.value = next
+    }
+}
+
 const { previewThumbs: previewImages, allImages, previewStartIndex } = usePreviewGallery<VideoPreviewSource>({
     getCoverImage: () => {
         if (!imageSrc.value) return null
@@ -265,7 +292,7 @@ const { previewThumbs: previewImages, allImages, previewStartIndex } = usePrevie
             hasLocalVideo: !!currentVideoPath.value,
         }
     },
-    getThumbs: () => thumbSources.value,
+    getThumbs: () => visibleThumbSources.value,
     createThumbImage: (item, idx) => {
         const src = toImageSrc(item.src)
         if (!src) return null
@@ -895,9 +922,9 @@ const deleteCover = async () => {
 // 按索引删除单个预览图（由 Fancybox 回调调用）
 const deleteThumbByIndex = async (thumbIdx: number) => {
     if (!props.video) return
-    if (thumbIdx < 0 || thumbIdx >= thumbSources.value.length) return
+    if (thumbIdx < 0 || thumbIdx >= visibleThumbSources.value.length) return
 
-    const thumbItem = thumbSources.value[thumbIdx]
+    const thumbItem = visibleThumbSources.value[thumbIdx]
     if (!thumbItem.localPath) {
         toast.info('远程预览图会在后台同步到 extrafanart，暂不支持直接删除')
         return
@@ -1055,7 +1082,8 @@ const downloadLongScreenshot = async () => {
                                                 class="rounded-md overflow-hidden border shadow-sm relative group bg-black/5 cursor-pointer hover:ring-2 hover:ring-primary transition-all"
                                                 @click="openPreviewThumbViewer(idx)">
                                                 <img :src="thumb.src" class="w-full h-auto object-cover"
-                                                    loading="lazy" referrerPolicy="no-referrer" />
+                                                    loading="lazy" referrerPolicy="no-referrer"
+                                                    @load="onThumbLoad($event, thumb.src)" />
                                             </div>
                                             <div v-if="previewImages.length === 0"
                                                 class="flex flex-col items-center justify-center py-8 text-muted-foreground gap-3">
