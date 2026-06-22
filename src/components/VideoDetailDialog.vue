@@ -52,7 +52,7 @@ import { useVideoStore } from '@/stores'
 import { useResourceScrapeStore } from '@/stores/resourceScrape'
 import { useSettingsStore } from '@/stores/settings'
 import { invoke } from '@tauri-apps/api/core'
-import { isDmmPlaceholderSize, isDmmImageUrl, dmmMonoCoverUrl } from '@/utils/dmm'
+import { isDmmPlaceholderSize, isDmmImageUrl, dmmCoverUrl, dmmMonoCoverUrl } from '@/utils/dmm'
 import CaptureCoverDialog from './CaptureCoverDialog.vue'
 import ImageFetchDialog from './ImageFetchDialog.vue'
 import DeleteVideoDialog from './DeleteVideoDialog.vue'
@@ -117,12 +117,16 @@ function resetPendingPreviewState() {
     pendingRemotePreviewThumbs.value = []
 }
 
-// 详情封面是否已回退到 DMM mono 版（占位图回退用，随视频/弹窗重置）
+// 详情封面 DMM 兜底状态（随视频/弹窗重置）：digital/mono 各试过一次的标记，以及彻底放弃标记。
+const coverTriedDigital = ref(false)
 const coverTriedMono = ref(false)
+const coverGaveUp = ref(false)
 function resetPendingCoverState() {
     pendingPosterSource.value = undefined
     pendingRemoteCoverUrl.value = ''
+    coverTriedDigital.value = false
     coverTriedMono.value = false
+    coverGaveUp.value = false
 }
 
 function resetScrapePendingState(options: { previews?: boolean } = {}) {
@@ -211,6 +215,15 @@ const imageSrc = computed(() => {
     }
 
     return ''
+})
+
+// 展示用封面：有真实封面/待存封面用它；否则与列表卡片一致，按番号直拼 DMM 官方封面兜底展示。
+// 加载失败 / DMM 占位图由 onCoverImgLoad / onCoverImgError 走 digital → mono → 放弃 兜底。
+// coverGaveUp 置位（digital+mono 都不行）后恒返回空，避免 props.poster 兜底回灌导致的重试死循环。
+const coverDisplaySrc = computed(() => {
+    if (coverGaveUp.value) return ''
+    if (imageSrc.value) return imageSrc.value
+    return dmmCoverUrl(formData.value.localId?.trim()) ?? ''
 })
 
 // Initialize form data when video changes
@@ -527,38 +540,63 @@ const openManualScrape = () => {
         videoPath: currentVideoPath.value,
     })
 }
-// 详情封面是 DMM 占位图（缺失卡兜底，数字版封面不存在时 302 跳到的 now_printing）时，
-// 与列表卡片一致：先回退到 mono 版而非清空 —— 卡片有图详情页也有图，且 keepCover 保持 true，
-// 一键刮削不会替换这张已有封面。mono 也是占位/加载失败才清空（视为真无封面，刮削去取真封面）。
-const fallbackCoverToMono = (): boolean => {
+// 封面加载失败 / DMM 占位图时，按番号回退 DMM 官方封面，与列表卡片一致：
+// 非 DMM 源（javbus 缩略图 / 本地真实封面）失败 → 试 digital → 再试 mono → 放弃；
+// digital 失败/占位 → mono；mono 失败/占位 → 放弃（彻底无封面，刮削去取真封面）。
+// 回退命中时写入 pendingPosterSource，使 keepCover 为真、一键刮削不替换这张兜底封面。
+const advanceCoverFallback = (failedSrc: string) => {
     const code = formData.value.localId?.trim()
-    if (!code || coverTriedMono.value) return false
-    const mono = dmmMonoCoverUrl(code)
-    if (!mono) return false
-    coverTriedMono.value = true
-    pendingPosterSource.value = mono
-    pendingRemoteCoverUrl.value = mono
-    return true
-}
-const clearDetailCover = () => {
-    pendingPosterSource.value = undefined
-    pendingRemoteCoverUrl.value = ''
-    if (formData.value.poster) formData.value.poster = ''
+    const digital = code ? dmmCoverUrl(code) : null
+    const mono = code ? dmmMonoCoverUrl(code) : null
+    const useDmm = (url: string) => {
+        pendingPosterSource.value = url
+        pendingRemoteCoverUrl.value = url
+    }
+    const giveUp = () => {
+        coverGaveUp.value = true
+        pendingPosterSource.value = undefined
+        pendingRemoteCoverUrl.value = ''
+        if (formData.value.poster) formData.value.poster = ''
+    }
+    // 失败的就是 mono 版 → 没救了
+    if (failedSrc.includes('/mono/movie/')) {
+        coverTriedMono.value = true
+        giveUp()
+        return
+    }
+    // 失败的是 digital 版 → 转 mono
+    if (failedSrc.includes('/digital/video/')) {
+        coverTriedDigital.value = true
+        if (mono && !coverTriedMono.value) {
+            coverTriedMono.value = true
+            useDmm(mono)
+        } else {
+            giveUp()
+        }
+        return
+    }
+    // 非 DMM 源失败 → 依次试 digital、mono
+    if (digital && !coverTriedDigital.value) {
+        coverTriedDigital.value = true
+        useDmm(digital)
+    } else if (mono && !coverTriedMono.value) {
+        coverTriedMono.value = true
+        useDmm(mono)
+    } else {
+        giveUp()
+    }
 }
 const onCoverImgLoad = (e: Event) => {
     const img = e.target as HTMLImageElement
     const src = img.currentSrc || img.src || ''
+    // 加载成功但其实是 DMM 占位图（digital now_printing 590×800 / mono noimage 90×122）：当失败处理
     if (isDmmImageUrl(src) && isDmmPlaceholderSize(img.naturalWidth, img.naturalHeight)) {
-        if (!fallbackCoverToMono()) clearDetailCover()
+        advanceCoverFallback(src)
     }
 }
 const onCoverImgError = (e: Event) => {
     const img = e.target as HTMLImageElement
-    const src = img.currentSrc || img.src || ''
-    // DMM 封面加载失败：数字版失败 → 试 mono；mono 也失败 → 清空
-    if (isDmmImageUrl(src) && !fallbackCoverToMono()) {
-        clearDetailCover()
-    }
+    advanceCoverFallback(img.currentSrc || img.src || '')
 }
 
 // 点击 导演/制作商/类别/演员 的 tag：关闭详情，跳到发现页对应维度并选中该取值
@@ -1051,7 +1089,7 @@ const downloadLongScreenshot = async () => {
                                 <div class="w-full min-h-[280px] rounded-lg overflow-hidden shadow-md relative bg-black/5 flex items-center justify-center transition-all"
                                     :class="imageSrc ? 'cursor-pointer hover:ring-2 hover:ring-primary' : ''"
                                     @click="imageSrc && openImageViewer(0)">
-                                    <img v-if="imageSrc" :src="imageSrc"
+                                    <img v-if="coverDisplaySrc" :src="coverDisplaySrc"
                                         class="w-full h-auto object-contain max-h-[280px]"
                                         referrerPolicy="no-referrer" @load="onCoverImgLoad" @error="onCoverImgError" />
                                     <div v-else
