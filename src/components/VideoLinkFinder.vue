@@ -73,12 +73,18 @@ const scheduler = createScheduler({
 const sources = scheduler.sources
 const running = scheduler.running
 
-// 进度统计
-const total = computed(() => sources.value.length)
-const searchedCount = computed(() =>
-  sources.value.filter((s) => ['found', 'failed', 'notfound'].includes(s.status)).length,
-)
-const foundCount = computed(() => sources.value.filter((s) => s.status === 'found').length)
+// 找到的正片链接（平铺、按 url 去重）。label 标注来源：脱敏「资源 N」/ 开发者模式真名。
+// 不暴露每源成功/失败状态——只列「能下的视频链接」。
+const foundLinks = computed(() => {
+  const seen = new Set<string>()
+  const out: { link: VideoLink; siteId: string; label: string }[] = []
+  sources.value.forEach((s, i) => {
+    if (s.status !== 'found' || !s.realLink || seen.has(s.realLink.url)) return
+    seen.add(s.realLink.url)
+    out.push({ link: s.realLink, siteId: s.siteId, label: isDeveloperMode ? s.siteId : `资源 ${i + 1}` })
+  })
+  return out
+})
 
 // 能否开始查找
 const canStart = computed(() => code.value.trim().length > 0 && !running.value)
@@ -216,8 +222,8 @@ function cancelDownload() {
 
 // 批量添加所有正片下载任务
 async function handleAddTasks(ignoreDuplicate: boolean = false) {
-  const foundSources = sources.value.filter((s) => s.status === 'found' && s.realLink)
-  if (foundSources.length === 0 || !savePath.value) return
+  const links = foundLinks.value
+  if (links.length === 0 || !savePath.value) return
 
   const filename = code.value.trim().toUpperCase()
 
@@ -240,10 +246,9 @@ async function handleAddTasks(ignoreDuplicate: boolean = false) {
   let success = 0
   let failed = 0
 
-  for (const s of foundSources) {
-    if (!s.realLink) continue
+  for (const item of links) {
     try {
-      await downloadStore.addTask(s.realLink.url, savePath.value, filename, s.siteId)
+      await downloadStore.addTask(item.link.url, savePath.value, filename, item.siteId)
       success++
     } catch { failed++ }
   }
@@ -298,9 +303,13 @@ onUnmounted(() => {
         停止
       </Button>
 
-      <!-- 进度摘要 -->
-      <span v-if="total > 0" class="text-xs text-muted-foreground tabular-nums">
-        已搜 {{ searchedCount }}/{{ total }} · 正片 {{ foundCount }}
+      <!-- 进度：不列源，只显示是否在跑 + 已找到链接数 -->
+      <span v-if="running" class="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Loader2 class="size-3 animate-spin" />
+        正在并行查找… 已找到 {{ foundLinks.length }} 个链接
+      </span>
+      <span v-else-if="foundLinks.length > 0" class="text-xs text-muted-foreground tabular-nums">
+        找到 {{ foundLinks.length }} 个链接
       </span>
     </div>
 
@@ -310,67 +319,49 @@ onUnmounted(() => {
       <div v-if="!running && sources.length === 0"
         class="flex flex-col items-center justify-center py-16 gap-3 text-muted-foreground">
         <LinkIcon class="size-8 opacity-30" />
-        <span class="text-sm">输入番号并点击查找，自动捕获候选下载链接，需要科学上网</span>
+        <span class="text-sm">输入番号并点击查找，后台并行抓取各源、抓到正片即显示链接，需要科学上网</span>
       </div>
 
-      <!-- 按源列表 -->
-      <div v-if="sources.length > 0" class="flex-1 flex flex-col min-h-0 gap-2 overflow-y-auto">
+      <!-- 搜索中、暂无链接 -->
+      <div v-else-if="running && foundLinks.length === 0"
+        class="flex flex-col items-center justify-center py-16 gap-3 text-muted-foreground">
+        <Loader2 class="size-8 animate-spin text-primary" />
+        <span class="text-sm">正在并行查找各源，首批可下链接稍候出现…</span>
+      </div>
+
+      <!-- 搜完无可用链接 -->
+      <div v-else-if="!running && foundLinks.length === 0"
+        class="flex flex-col items-center justify-center py-16 gap-3 text-muted-foreground">
+        <X class="size-8 opacity-30" />
+        <span class="text-sm">未找到可用的视频链接，可稍后重试</span>
+      </div>
+
+      <!-- 平铺视频链接列表（每源一条正片，按 url 去重） -->
+      <div v-else class="flex-1 flex flex-col min-h-0 gap-2 overflow-y-auto">
         <div
-          v-for="(s, i) in sources"
-          :key="s.siteId"
-          class="rounded-md border p-2.5"
+          v-for="item in foundLinks"
+          :key="item.link.url"
+          class="rounded-md border p-2.5 flex items-center gap-2"
         >
-          <div class="flex items-center gap-2">
-            <span class="text-sm font-medium">{{ isDeveloperMode ? s.siteId : `资源 ${i + 1}` }}</span>
-            <Badge v-if="s.status === 'searching'" class="gap-1">
-              <Loader2 class="size-3 animate-spin" />
-              搜索中
-            </Badge>
-            <Badge v-else-if="s.status === 'cf'" variant="secondary">CF 验证中</Badge>
-            <Badge v-else-if="s.status === 'found'" class="bg-green-600 text-white">✓ 正片</Badge>
-            <Badge v-else-if="s.status === 'notfound'" variant="secondary">404</Badge>
-            <Badge v-else-if="s.status === 'failed'" variant="secondary">✗ 失败</Badge>
-            <Badge v-else variant="outline">等待中</Badge>
-          </div>
-          <div v-if="s.realLink" class="mt-1.5 flex items-center gap-2">
-            <Badge v-if="s.realLink.height" variant="outline" class="shrink-0">{{ s.realLink.height }}p</Badge>
-            <Badge v-if="s.realLink.durationSecs" variant="outline" class="shrink-0 tabular-nums">{{ formatDuration(s.realLink.durationSecs) }}</Badge>
-            <Badge v-if="formatRes(s.realLink) && !s.realLink.height" variant="outline" class="shrink-0">{{ formatRes(s.realLink) }}</Badge>
-            <span class="font-mono text-xs text-muted-foreground break-all flex-1">{{ s.realLink.url }}</span>
-            <Button
-              v-if="s.realLink.isHls"
-              size="icon"
-              variant="ghost"
-              class="h-8 w-8 shrink-0"
-              title="预览播放"
-              @click="handlePreview(s.realLink)"
-            >
-              <Play class="size-4" />
-            </Button>
-            <Button
-              size="icon"
-              variant="ghost"
-              class="h-8 w-8 shrink-0"
-              title="下载资源"
-              @click="handleDownloadSingle(s.realLink, s.siteId)"
-            >
-              <Download class="size-4" />
-            </Button>
-            <Button
-              size="icon"
-              variant="ghost"
-              class="h-8 w-8 shrink-0"
-              title="复制下载链接"
-              @click="copyDownloadLink(s.realLink.url)"
-            >
-              <LinkIcon class="size-4" />
-            </Button>
-          </div>
+          <Badge variant="outline" class="shrink-0">{{ item.label }}</Badge>
+          <Badge v-if="item.link.height" variant="outline" class="shrink-0">{{ item.link.height }}p</Badge>
+          <Badge v-else-if="formatRes(item.link)" variant="outline" class="shrink-0">{{ formatRes(item.link) }}</Badge>
+          <Badge v-if="item.link.durationSecs" variant="outline" class="shrink-0 tabular-nums">{{ formatDuration(item.link.durationSecs) }}</Badge>
+          <span class="font-mono text-xs text-muted-foreground break-all flex-1">{{ item.link.url }}</span>
+          <Button v-if="item.link.isHls" size="icon" variant="ghost" class="h-8 w-8 shrink-0" title="预览播放" @click="handlePreview(item.link)">
+            <Play class="size-4" />
+          </Button>
+          <Button size="icon" variant="ghost" class="h-8 w-8 shrink-0" title="下载资源" @click="handleDownloadSingle(item.link, item.siteId)">
+            <Download class="size-4" />
+          </Button>
+          <Button size="icon" variant="ghost" class="h-8 w-8 shrink-0" title="复制下载链接" @click="copyDownloadLink(item.link.url)">
+            <LinkIcon class="size-4" />
+          </Button>
         </div>
       </div>
 
-      <!-- 保存路径和批量下载（有正片时显示） -->
-      <div v-if="foundCount > 0" class="flex items-center gap-2 mt-auto pt-2 border-t">
+      <!-- 保存路径和批量下载（有链接时显示） -->
+      <div v-if="foundLinks.length > 0" class="flex items-center gap-2 mt-auto pt-2 border-t">
         <div class="flex-1 min-w-0 truncate text-xs text-muted-foreground">
           保存到：{{ savePath || '未设置默认下载路径，请在系统设置 - 下载设置中配置' }}
         </div>
@@ -378,7 +369,7 @@ onUnmounted(() => {
           @click="() => handleAddTasks(false)">
           <Loader2 v-if="adding" class="mr-2 size-4 animate-spin" />
           <Download v-else class="mr-2 size-4" />
-          下载全部正片（{{ foundCount }}）
+          下载全部（{{ foundLinks.length }}）
         </Button>
       </div>
     </div>
