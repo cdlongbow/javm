@@ -84,6 +84,12 @@ impl WebviewPoolState {
         let max_windows = max_windows.max(1);
 
         loop {
+            // 先创建并注册等待者，再检查条件：否则在「丢锁 → await」之间发生的
+            // release() / notify_waiters() 会丢唤醒，导致 acquire 永久挂起（tokio Notify 标准写法）。
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
             let lease = {
                 let mut inner = lock_webview_pool(&self.inner);
 
@@ -146,7 +152,7 @@ impl WebviewPoolState {
                 return lease;
             }
 
-            self.notify.notified().await;
+            notified.as_mut().await;
         }
     }
 
