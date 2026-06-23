@@ -271,7 +271,7 @@ export interface FinderPageStateEvent {
 
 /** 查找事件：云防护状态变化 */
 export interface FinderCfStateEvent {
-    site: string
+    siteId?: string
     status: 'idle' | 'active' | 'passed' | 'timeout' | 'failed'
     active: boolean
 }
@@ -292,8 +292,8 @@ export async function findVideoLinks(code: string, siteId?: string): Promise<voi
 }
 
 /** 鍏抽棴瑙嗛鏌ユ壘 WebView */
-export async function closeVideoFinder(): Promise<void> {
-    return tauriInvoke('rs_close_video_finder')
+export async function closeVideoFinder(siteId: string): Promise<void> {
+    return tauriInvoke('rs_close_video_finder', { siteId })
 }
 
 /** 关闭全部并行视频查找窗口（停止时调用） */

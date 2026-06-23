@@ -101,6 +101,7 @@ export function createScheduler(deps: SchedulerDeps) {
     for (const t of timers.values()) clearTimeout(t)
     timers.clear()
     void deps.closeAll()
+    for (const s of sources.value) { if (!DONE.includes(s.status)) s.status = 'failed' }
     running.value = false
     queue.length = 0
   }
@@ -145,20 +146,16 @@ export function createScheduler(deps: SchedulerDeps) {
     if (e.state === 'not-found' && s && !s.realLink) settle(e.site, 'notfound')
   }
 
-  function onCfState(e: { site: string; status: string; active: boolean }) {
-    const s = st(e.site)
+  function onCfState(e: { siteId?: string; status: string; active: boolean }) {
+    const s = e.siteId ? st(e.siteId) : undefined
     if (!s || DONE.includes(s.status)) return
     if (e.active) {
       s.status = 'cf'
-      const t = timers.get(e.site)
-      if (t) {
-        clearTimeout(t)
-        timers.delete(e.site)
-      }
+      const t = timers.get(e.siteId!); if (t) { clearTimeout(t); timers.delete(e.siteId!) }
     } else if (s.status === 'cf') {
       s.status = 'searching'
-      const t = setTimeout(() => settle(e.site, 'failed'), deps.timeoutSecs * 1000)
-      timers.set(e.site, t)
+      const t = setTimeout(() => settle(e.siteId!, 'failed'), deps.timeoutSecs * 1000)
+      timers.set(e.siteId!, t)
     }
   }
 
