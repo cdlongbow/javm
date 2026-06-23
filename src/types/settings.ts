@@ -119,6 +119,8 @@ export interface ScrapeSettings {
     concurrent: number
     scraperPriority: string[]
     maxWebviewWindows: number
+    linkFinderConcurrency: number // 并行查找源的最大并发数（1-3）
+    linkFinderSourceTimeoutSecs: number // 单个源最长查找秒数（无正片即放弃）
     webviewEnabled: boolean    // 是否启用 WebView 增强模式
     webviewFallbackEnabled: boolean // HTTP 失败后是否回退到 WebView（开发者选项）
     devShowWebview: boolean    // 开发调试时默认显示隐藏 WebView（开发者选项）
@@ -235,6 +237,8 @@ export const defaultSettings: AppSettings = {
         concurrent: 5,
         scraperPriority: ['javbus', 'javmenu', 'javxx'],
         maxWebviewWindows: 3,
+        linkFinderConcurrency: 3,
+        linkFinderSourceTimeoutSecs: 120,
         webviewEnabled: false,
         webviewFallbackEnabled: false,
         devShowWebview: false,

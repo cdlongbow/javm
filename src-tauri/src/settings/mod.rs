@@ -287,6 +287,10 @@ pub struct ScrapeSettings {
     pub scraper_priority: Vec<String>,
     #[serde(rename = "maxWebviewWindows", default = "default_scrape_max_webview_windows")]
     pub max_webview_windows: u32,
+    #[serde(rename = "linkFinderConcurrency", default = "default_link_finder_concurrency")]
+    pub link_finder_concurrency: u32,
+    #[serde(rename = "linkFinderSourceTimeoutSecs", default = "default_link_finder_source_timeout")]
+    pub link_finder_source_timeout_secs: u32,
     #[serde(rename = "webviewEnabled", default)]
     pub webview_enabled: bool,
     #[serde(rename = "webviewFallbackEnabled", default)]
@@ -415,6 +419,14 @@ fn default_scrape_max_webview_windows() -> u32 {
     3
 }
 
+fn default_link_finder_concurrency() -> u32 {
+    3
+}
+
+fn default_link_finder_source_timeout() -> u32 {
+    120
+}
+
 fn merge_scrape_sites(saved_sites: &[ResourceSite]) -> Vec<ResourceSite> {
     let mut merged = sources::default_sites();
     for site in &mut merged {
@@ -430,6 +442,8 @@ fn merge_scrape_sites(saved_sites: &[ResourceSite]) -> Vec<ResourceSite> {
 fn normalize_scrape_settings(scrape: &mut ScrapeSettings) {
     scrape.concurrent = scrape.concurrent.clamp(1, 10);
     scrape.max_webview_windows = scrape.max_webview_windows.clamp(1, 8);
+    scrape.link_finder_concurrency = scrape.link_finder_concurrency.clamp(1, 3);
+    scrape.link_finder_source_timeout_secs = scrape.link_finder_source_timeout_secs.clamp(30, 600);
     scrape.sites = merge_scrape_sites(&scrape.sites);
     normalize_anti_block_settings(&mut scrape.anti_block);
 
@@ -628,6 +642,8 @@ impl Default for ScrapeSettings {
             concurrent: 5,
             scraper_priority: vec!["javbus".to_string(), "javmenu".to_string(), "javxx".to_string()],
             max_webview_windows: default_scrape_max_webview_windows(),
+            link_finder_concurrency: default_link_finder_concurrency(),
+            link_finder_source_timeout_secs: default_link_finder_source_timeout(),
             webview_enabled: false,
             webview_fallback_enabled: false,
             dev_show_webview: false,
