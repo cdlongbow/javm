@@ -257,6 +257,25 @@ export interface HlsInfo {
     isVod: boolean
 }
 
+/** 查找事件：新链接发现 */
+export interface FinderLinkEvent {
+    site: string
+    url: string
+}
+
+/** 查找事件：页面状态变化 */
+export interface FinderPageStateEvent {
+    site: string
+    state: string
+}
+
+/** 查找事件：云防护状态变化 */
+export interface FinderCfStateEvent {
+    site: string
+    status: 'idle' | 'active' | 'passed' | 'timeout' | 'failed'
+    active: boolean
+}
+
 /** 抓取并分析单个 m3u8，返回时长/分辨率等，用于识别真实正片 */
 export async function analyzeHls(url: string): Promise<HlsInfo> {
     return tauriInvoke<HlsInfo>('rs_analyze_hls', { url })
@@ -275,6 +294,11 @@ export async function findVideoLinks(code: string, siteId?: string): Promise<voi
 /** 鍏抽棴瑙嗛鏌ユ壘 WebView */
 export async function closeVideoFinder(): Promise<void> {
     return tauriInvoke('rs_close_video_finder')
+}
+
+/** 关闭全部并行视频查找窗口（停止时调用） */
+export async function closeAllVideoFinders(): Promise<void> {
+    return tauriInvoke('rs_close_all_video_finders')
 }
 
 /** 妫€鏌ユ寚瀹氱暘鍙疯棰戞槸鍚﹀凡瀛樺湪 */
