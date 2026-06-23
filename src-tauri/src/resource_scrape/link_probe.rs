@@ -22,7 +22,11 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 
-use super::video_finder::{INTERCEPT_JS, VIDEO_FINDER_LABEL};
+use super::video_finder::INTERCEPT_JS;
+
+/// link_probe 独占的 WebView 窗口标识（与 video_finder 的 per-site 窗口互不干扰）
+/// 注意：不以 "video_finder_" 开头，避免被 close_all_video_finders 的前缀过滤误关
+const PROBE_LABEL: &str = "link_probe_webview";
 use super::webview_support;
 
 fn default_code() -> String {
@@ -182,7 +186,7 @@ async fn probe_one(
     };
 
     // 关闭可能残留的窗口
-    if let Some(existing) = app.get_webview_window(VIDEO_FINDER_LABEL) {
+    if let Some(existing) = app.get_webview_window(PROBE_LABEL) {
         let _ = existing.close();
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
@@ -192,7 +196,7 @@ async fn probe_one(
         Err(e) => return ProbeResult::fail(&target.name, url, format!("数据目录失败: {e}")),
     };
 
-    let builder = WebviewWindowBuilder::new(app, VIDEO_FINDER_LABEL, WebviewUrl::External(parsed))
+    let builder = WebviewWindowBuilder::new(app, PROBE_LABEL, WebviewUrl::External(parsed))
         .title("link probe")
         .inner_size(1920.0, 1080.0)
         .visible(false)
@@ -219,7 +223,8 @@ async fn probe_one(
         String::new()
     };
     for i in 0..cycles {
-        let _ = window.eval(INTERCEPT_JS);
+        let probe_intercept = INTERCEPT_JS.replace("__VIDEO_FINDER_SITE__", "probe");
+        let _ = window.eval(&probe_intercept);
         // 触发播放：很多详情页要点击/调用 play() 才会发起 m3u8 请求，主动 kickstart
         let _ = window.eval(PLAYBACK_KICK_JS);
         if target.follow && i >= FOLLOW_WARMUP_CYCLES {

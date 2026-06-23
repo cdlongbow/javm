@@ -2053,10 +2053,17 @@ pub async fn rs_find_video_links(
     super::video_finder::open_video_finder_webview(&app, &code, &site, show_on_cf)
 }
 
-/// 关闭视频查找 WebView 窗口
+/// 关闭指定 site 的视频查找 WebView 窗口
 #[tauri::command]
-pub async fn rs_close_video_finder(app: AppHandle) -> Result<(), String> {
-    super::video_finder::close_video_finder_webview(&app)
+pub async fn rs_close_video_finder(app: AppHandle, site_id: String) -> Result<(), String> {
+    super::video_finder::close_video_finder_webview(&app, &site_id)
+}
+
+/// 关闭所有视频查找 WebView 窗口
+#[tauri::command]
+pub async fn rs_close_all_video_finders(app: tauri::AppHandle) -> Result<(), String> {
+    super::video_finder::close_all_video_finders(&app);
+    Ok(())
 }
 
 /// 获取启用的下载源（资源链接站点），按下载成功次数从高到低排序

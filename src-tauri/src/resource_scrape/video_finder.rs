@@ -75,8 +75,13 @@ pub fn build_site_url(site_id: &str, code: &str) -> Result<String, String> {
         .replace("{code}", &code.to_lowercase()))
 }
 
-/// WebView 窗口标识
-pub(crate) const VIDEO_FINDER_LABEL: &str = "video_finder_webview";
+/// WebView 窗口标识前缀
+pub(crate) const VIDEO_FINDER_LABEL_PREFIX: &str = "video_finder_";
+
+/// 根据 site_id 生成对应的 WebView 窗口标识
+pub(crate) fn video_finder_label(site_id: &str) -> String {
+    format!("{}{}", VIDEO_FINDER_LABEL_PREFIX, site_id)
+}
 
 /// 视频链接查找最大运行时长（秒）
 const FINDER_MAX_RUNTIME_SECS: u64 = 20 * 60;
@@ -88,6 +93,7 @@ const VIDEO_FINDER_CF_STATE_EVENT: &str = "video-finder-cf-state";
 /// 拦截 XMLHttpRequest、fetch、HLS.js 等，捕获视频链接并通过 Tauri 事件发送
 pub(crate) const INTERCEPT_JS: &str = r#"
 (function() {
+    var __SITE__ = '__VIDEO_FINDER_SITE__';
     if (window.__CF_CHALLENGE_ACTIVE__) return;
     if (window.__VIDEO_FINDER_INJECTED__) return;
     window.__VIDEO_FINDER_INJECTED__ = true;
@@ -113,7 +119,7 @@ pub(crate) const INTERCEPT_JS: &str = r#"
         window.__VIDEO_FINDER_URLS__.add(url);
         try {
             if (window.__TAURI__ && window.__TAURI__.event) {
-                window.__TAURI__.event.emit('video-finder-link', url);
+                window.__TAURI__.event.emit('video-finder-link', { site: __SITE__, url: url });
             }
         } catch(e) {
             console.log('[VideoFinder] emit 失败:', e);
@@ -275,7 +281,7 @@ pub(crate) const INTERCEPT_JS: &str = r#"
             __notFoundReported = true;
             try {
                 if (window.__TAURI__ && window.__TAURI__.event) {
-                    window.__TAURI__.event.emit('video-finder-page-state', 'not-found');
+                    window.__TAURI__.event.emit('video-finder-page-state', { site: __SITE__, state: 'not-found' });
                 }
             } catch(e) {}
         }
@@ -335,8 +341,11 @@ pub fn open_video_finder_webview(
         .parse()
         .map_err(|e: url::ParseError| format!("URL 解析失败: {}", e))?;
 
-    // 如果已有窗口，关闭后重建（确保干净状态）
-    if let Some(existing) = app.get_webview_window(VIDEO_FINDER_LABEL) {
+    let label = video_finder_label(&site_id_string);
+    let intercept = INTERCEPT_JS.replace("__VIDEO_FINDER_SITE__", &site_id_string);
+
+    // 如果已有同 site 窗口，关闭后重建（确保干净状态）
+    if let Some(existing) = app.get_webview_window(&label) {
         let _ = existing.close();
         // 等待窗口关闭
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -349,7 +358,7 @@ pub fn open_video_finder_webview(
 
     let anti_detection_js = webview_support::build_anti_detection_script();
     let builder =
-        WebviewWindowBuilder::new(app, VIDEO_FINDER_LABEL, WebviewUrl::External(parsed_url.clone()))
+        WebviewWindowBuilder::new(app, &label, WebviewUrl::External(parsed_url.clone()))
             .title(format!("查找视频链接 - {}", code.to_uppercase()))
             .inner_size(
                 webview_support::SCRAPER_VIEWPORT_WIDTH,
@@ -363,7 +372,7 @@ pub fn open_video_finder_webview(
             .user_agent(webview_support::WEBVIEW_USER_AGENT)
             .initialization_script(&anti_detection_js)
             // 提前注入拦截脚本，确保在页面 JS 执行前就绪，不漏掉初始网络请求
-            .initialization_script(INTERCEPT_JS)
+            .initialization_script(&intercept)
             .data_directory(data_directory);
 
     #[cfg(target_os = "windows")]
@@ -404,8 +413,8 @@ pub fn open_video_finder_webview(
     let cf_probe_js = webview_support::build_cf_probe_script(&cf_event_name);
 
     // CF 探测脚本 + 拦截脚本合并为一次 eval，确保先检测 CF 再决定是否注入拦截器。
-    // INTERCEPT_JS 会检查 window.__CF_CHALLENGE_ACTIVE__，CF 页面上不会修改浏览器 API。
-    let combined_js = format!("{}\n{}", cf_probe_js, INTERCEPT_JS);
+    // intercept 已替换 __VIDEO_FINDER_SITE__ 占位符，CF 页面上不会修改浏览器 API。
+    let combined_js = format!("{}\n{}", cf_probe_js, intercept);
 
     // 跟踪 CF 状态，用于调整注入频率
     let cf_active = Arc::new(AtomicBool::new(false));
@@ -466,7 +475,7 @@ pub fn open_video_finder_webview(
             }
 
             // 检查窗口是否还存在
-            if app_clone.get_webview_window(VIDEO_FINDER_LABEL).is_none() {
+            if app_clone.get_webview_window(&label).is_none() {
                 log::info!(
                     "[video_finder] event=window_closed_stop_inject site={} code={}",
                     site_id_owned,
@@ -520,13 +529,24 @@ pub fn open_video_finder_webview(
     Ok(())
 }
 
-/// 关闭视频查找 WebView 窗口
-pub fn close_video_finder_webview(app: &AppHandle) -> Result<(), String> {
-    log::info!("[video_finder] event=close_requested");
-    webview_support::emit_cf_state(app, VIDEO_FINDER_CF_STATE_EVENT, "idle", None, 0);
-    if let Some(window) = app.get_webview_window(VIDEO_FINDER_LABEL) {
+/// 关闭指定 site 的视频查找 WebView 窗口
+pub fn close_video_finder_webview(app: &AppHandle, site_id: &str) -> Result<(), String> {
+    log::info!("[video_finder] event=close_requested site={}", site_id);
+    webview_support::emit_cf_state(app, VIDEO_FINDER_CF_STATE_EVENT, "idle", Some(site_id.to_string()), 0);
+    if let Some(window) = app.get_webview_window(&video_finder_label(site_id)) {
         window.close().map_err(|e| format!("关闭窗口失败: {}", e))?;
     }
     Ok(())
+}
+
+/// 关闭所有视频查找 WebView 窗口，并按 site 逐个发 idle 状态
+pub fn close_all_video_finders(app: &AppHandle) {
+    let windows = app.webview_windows();
+    for (label, w) in &windows {
+        if let Some(site_id) = label.strip_prefix(VIDEO_FINDER_LABEL_PREFIX) {
+            webview_support::emit_cf_state(app, VIDEO_FINDER_CF_STATE_EVENT, "idle", Some(site_id.to_string()), 0);
+            let _ = w.close();
+        }
+    }
 }
 

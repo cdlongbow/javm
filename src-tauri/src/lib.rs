@@ -418,6 +418,7 @@ pub fn run() {
             resource_scrape::commands::rs_check_video_completely_scraped,
             resource_scrape::commands::rs_find_video_links,
             resource_scrape::commands::rs_close_video_finder,
+            resource_scrape::commands::rs_close_all_video_finders,
             resource_scrape::commands::rs_get_video_sites,
             resource_scrape::commands::rs_analyze_hls,
             resource_scrape::commands::rs_check_video_exists_by_code,
