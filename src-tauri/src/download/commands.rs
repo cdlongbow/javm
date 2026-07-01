@@ -1136,3 +1136,25 @@ pub async fn batch_delete_tasks(
     }
     Ok(failed)
 }
+
+/// 将预览图另存到用户选定的目标路径。
+///
+/// `src` 支持三种来源：远程 `http(s)://` URL、`data:` base64、本地文件路径，
+/// 统一复用 `download::image::save_image_url_to`（http 下载 / base64 解码 / 本地复制）。
+/// 目标路径由前端「系统另存为对话框」选定，用 std::fs 直接写盘，不受前端 fs 权限范围限制。
+#[tauri::command]
+pub async fn save_image_as(src: String, target_path: String) -> Result<String, String> {
+    let src = src.trim();
+    if src.is_empty() {
+        return Err("图片来源为空".to_string());
+    }
+
+    let target = std::path::Path::new(&target_path);
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建目标目录失败: {}", e))?;
+        }
+    }
+
+    crate::download::image::save_image_url_to(src, target, None).await
+}

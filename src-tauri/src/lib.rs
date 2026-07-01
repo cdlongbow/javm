@@ -397,6 +397,7 @@ pub fn run() {
             download::commands::batch_stop_tasks,
             download::commands::batch_retry_tasks,
             download::commands::batch_delete_tasks,
+            download::commands::save_image_as,
             // 资源刮削
             resource_scrape::commands::rs_search_resource,
             resource_scrape::commands::rs_scrape_fused,

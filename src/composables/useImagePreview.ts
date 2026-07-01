@@ -4,6 +4,9 @@
  */
 import { Fancybox } from '@fancyapps/ui/dist/fancybox/'
 import '@fancyapps/ui/dist/fancybox/fancybox.css'
+import { invoke } from '@tauri-apps/api/core'
+import { save } from '@tauri-apps/plugin-dialog'
+import { toast } from 'vue-sonner'
 
 /** 图片项定义 */
 export interface PreviewImage {
@@ -12,6 +15,8 @@ export interface PreviewImage {
   title?: string
   /** 是否有关联的本地视频（决定是否显示删除按钮） */
   hasLocalVideo?: boolean
+  /** 另存为时使用的原始来源（http/data/本地路径）；缺省时从 src 还原 */
+  downloadSrc?: string
   /** 自定义数据，回调时原样返回 */
   data?: Record<string, any>
 }
@@ -31,6 +36,47 @@ let fancyboxOpen = false
 /** 检查 Fancybox 是否正在打开（供外部判断是否阻止 interact-outside） */
 export function isFancyboxOpen() {
   return fancyboxOpen
+}
+
+/**
+ * 把预览用的 src 还原成后端可保存的来源。
+ * 本地图片经 convertFileSrc 变成 `http://asset.localhost/<encoded>`（Win）或
+ * `asset://localhost/<encoded>`（mac/linux），需解码回真实文件路径；
+ * 远程 http(s) / data URL 原样返回（后端负责下载或解码）。
+ */
+function toSavableSource(src: string): string {
+  const assetMatch = src.match(
+    /^(?:https?:\/\/asset\.localhost\/|asset:\/\/localhost\/|asset:\/\/)(.+)$/i,
+  )
+  if (assetMatch) {
+    const encoded = assetMatch[1].split(/[?#]/)[0]
+    try {
+      return decodeURIComponent(encoded)
+    } catch {
+      return encoded
+    }
+  }
+  return src
+}
+
+/** 从来源与标题推断另存为对话框的默认文件名 */
+function deriveDefaultName(savable: string, title?: string): string {
+  if (savable.startsWith('data:')) {
+    const header = savable.slice(5, savable.indexOf(',') === -1 ? undefined : savable.indexOf(','))
+    const mime = header.split(';')[0]
+    const ext = (mime.split('/')[1] || 'jpg').split('+')[0]
+    return `${title?.trim() || 'image'}.${ext}`
+  }
+  const clean = savable.split(/[?#]/)[0]
+  let base = clean.split(/[\\/]/).pop() || ''
+  // 远程 URL 的文件名可能是 percent-encoded；本地路径已是真实名，解码失败则保留原样
+  try {
+    base = decodeURIComponent(base)
+  } catch {
+    /* 保留原始文件名 */
+  }
+  if (base && /\.[a-z0-9]{2,5}$/i.test(base)) return base
+  return `${title?.trim() || base || 'image'}.jpg`
 }
 
 /**
@@ -97,13 +143,29 @@ export function openImagePreview(
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
         </svg>
       </button>`,
-      click: () => {
+      click: async () => {
         const fb = Fancybox.getInstance()
         if (!fb) return
         const idx = fb.getSlide()?.index ?? 0
         const img = images[idx]
-        if (img) {
-          window.open(img.src, '_blank')
+        if (!img) return
+
+        const savable = toSavableSource(img.downloadSrc ?? img.src)
+        const defaultName = deriveDefaultName(savable, img.title)
+
+        try {
+          const targetPath = await save({
+            defaultPath: defaultName,
+            filters: [
+              { name: '图片', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'] },
+            ],
+          })
+          if (!targetPath) return
+
+          await invoke('save_image_as', { src: savable, targetPath })
+          toast.success('图片已保存')
+        } catch (e) {
+          toast.error('保存失败: ' + String(e))
         }
       },
     },
